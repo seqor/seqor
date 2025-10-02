@@ -3,10 +3,10 @@ const std = @import("std");
 
 const httpz = @import("httpz");
 
-const Context = @import("dispatch.zig").Context;
+const AppContext = @import("dispatch.zig").AppContext;
 
 /// insertLokiJson defines a loki json insertion operation
-pub fn insertLokiJson(ctx: *Context, r: *httpz.Request, res: *httpz.Response) !void {
+pub fn insertLokiJson(ctx: *AppContext, r: *httpz.Request, res: *httpz.Response) !void {
     const contentType = r.headers.get("Content-Type");
     if (contentType != null and !std.mem.eql(u8, "application/json", contentType.?)) {
         res.status = 400;
@@ -42,7 +42,7 @@ pub fn insertLokiJson(ctx: *Context, r: *httpz.Request, res: *httpz.Response) !v
 }
 
 /// insertLokiReady defines a loki handler to signal its readiness
-pub fn insertLokiReady(_: *Context, _: *httpz.Request, res: *httpz.Response) !void {
+pub fn insertLokiReady(_: *AppContext, _: *httpz.Request, res: *httpz.Response) !void {
     res.status = 200;
     res.body = "ready";
 }
