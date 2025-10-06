@@ -1,16 +1,19 @@
 const AppConfig = @import("conf.zig").AppConfig;
 
 const httpz = @import("httpz");
+const Processor = @import("process.zig").Processor;
 
 pub const AppContext = struct {
     conf: AppConfig,
+    processor: *Processor,
 };
 
 pub const Dispatcher = struct {
     conf: AppConfig,
+    processor: *Processor,
 
     pub fn dispatch(self: *Dispatcher, action: httpz.Action(*AppContext), req: *httpz.Request, res: *httpz.Response) !void {
-        var ctx = AppContext{ .conf = self.conf };
+        var ctx = AppContext{ .conf = self.conf, .processor = self.processor };
 
         action(&ctx, req, res) catch {
             res.status = 500;

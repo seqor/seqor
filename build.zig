@@ -10,10 +10,14 @@ pub fn build(b: *std.Build) void {
     const httpz = b.dependency("httpz", .{
         .target = target,
     });
+    const snappy = b.dependency("snappy", .{
+        .target = target,
+    });
 
     const imports = [_]std.Build.Module.Import{
         std.Build.Module.Import{ .name = "datetime", .module = datetime.module("datetime") },
         std.Build.Module.Import{ .name = "httpz", .module = httpz.module("httpz") },
+        std.Build.Module.Import{ .name = "snappy", .module = snappy.module("snappy") },
     };
 
     const exe = b.addExecutable(.{

@@ -4,12 +4,13 @@ const httpz = @import("httpz");
 
 const Conf = @import("conf.zig").Conf;
 const Dispatcher = @import("dispatch.zig").Dispatcher;
-const Context = @import("dispatch.zig").AppContext;
+const AppContext = @import("dispatch.zig").AppContext;
+const Processor = @import("process.zig").Processor;
 const insert = @import("insert.zig");
 
 var global_server: ?*httpz.Server(*Dispatcher) = null;
 
-fn health(_: *Context, _: *httpz.Request, res: *httpz.Response) !void {
+fn health(_: *AppContext, _: *httpz.Request, res: *httpz.Response) !void {
     res.status = 200;
 }
 
@@ -23,6 +24,7 @@ pub fn startServer(allocator: std.mem.Allocator, conf: Conf) !void {
     const dispatcher = try allocator.create(Dispatcher);
     defer allocator.destroy(dispatcher);
     dispatcher.conf = conf.app;
+    dispatcher.processor = try allocator.create(Processor);
     var server = try httpz.Server(*Dispatcher).init(allocator, .{ .port = conf.port }, dispatcher);
     defer server.deinit();
 

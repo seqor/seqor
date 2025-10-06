@@ -7,6 +7,7 @@ pub const Conf = struct {
 
     app: AppConfig,
 
+    // TODO: implement yaml/toml/etc. based config
     pub fn default() Conf {
         return Conf{
             .port = 9012,
