@@ -12,7 +12,7 @@ Seqor is a cost-effective, Loki compatible database for logs.
 
 ### Clone the Repository
 ```bash
-git clone https://github.com/your-org/seqor.git
+git clone git@github.com:seqor/seqor.git
 cd seqor
 ```
 
