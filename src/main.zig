@@ -24,7 +24,7 @@ pub fn main() !void {
             },
             .options = try runner.allocOptions(&.{
                 .{
-                    .long_name = "config-file",
+                    .long_name = "config",
                     .short_alias = 'c',
                     .help = "file path to configuration file",
                     .value_ref = runner.mkRef(&cli_config.config),
