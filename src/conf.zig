@@ -14,6 +14,17 @@ pub const Conf = struct {
 
     app: AppConfig,
 
+    pub fn default() Conf {
+        return Conf{
+            .server = .{
+                .port = 9012,
+            },
+            .app = .{
+                .maxRequestSize = 1024 * 1024 * 4,
+            },
+        };
+    }
+
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Conf {
         const yml_path = try std.fs.cwd().realpathAlloc(
             allocator,
