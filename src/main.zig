@@ -39,7 +39,6 @@ pub fn main() !void {
     return runner.run(&app);
 }
 
-// Action function to execute when the "short" command is invoked.
 fn run_server() !void {
     std.debug.print("Seqor version {s}", .{build.version});
 
