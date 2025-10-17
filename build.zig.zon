@@ -48,6 +48,10 @@
             .url = "https://github.com/pwbh/ymlz/archive/refs/tags/0.6.0.tar.gz",
             .hash = "ymlz-0.5.0-TG82aXqrAAC-NtiqbYQC2cNo4Qr9L9LDKEKMYRjtK6vT",
         },
+        .cli = .{
+            .url = "git+https://github.com/sam701/zig-cli?ref=zig-0.15#cb44aade25a3c1eddd8b6f990b50c2189442c1e2",
+            .hash = "cli-0.10.0-2eKe_5kEAQBeHqKxUHNTGnETzu81rqKWwT1WPt1jXBt0",
+        },
     },
     .paths = .{
         "build.zig",
