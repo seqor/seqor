@@ -6,6 +6,7 @@ const Conf = @import("conf.zig").Conf;
 const Dispatcher = @import("dispatch.zig").Dispatcher;
 const AppContext = @import("dispatch.zig").AppContext;
 const Processor = @import("process.zig").Processor;
+const Store = @import("store.zig").Store;
 const insert = @import("insert.zig");
 
 var global_server: ?*httpz.Server(*Dispatcher) = null;
