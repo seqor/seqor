@@ -11,7 +11,9 @@ const Params = @import("process.zig").Params;
 
 /// insertLokiJson defines a loki json insertion operation
 pub fn insertLokiJson(ctx: *AppContext, r: *httpz.Request, res: *httpz.Response) !void {
-    const contentType = r.headers.get("Content-Type");
+    std.debug.print("Loki insert request received\n", .{});
+    const contentType = r.header("content-type");
+
     if (contentType != null and !std.mem.eql(u8, "application/json", contentType.?)) {
         // TODO: implement protobuf marhsalling
         res.status = 400;
@@ -21,8 +23,10 @@ pub fn insertLokiJson(ctx: *AppContext, r: *httpz.Request, res: *httpz.Response)
     // TODO: consider using concurrent reader of the body,
     // currently the entire body is pre-read by the start of the API handler
     const body = r.body();
+
     if (body == null) {
         res.body = "given empty body";
+        res.body = "change";
         res.status = 400;
         return;
     }
@@ -31,8 +35,9 @@ pub fn insertLokiJson(ctx: *AppContext, r: *httpz.Request, res: *httpz.Response)
         res.status = 400;
         return;
     }
+
     // TODO: validate a disk has enough space
-    const encoding = r.headers.get("Content-Encoding") orelse "";
+    const encoding = r.header("content-encoding") orelse "";
     const uncompressed = uncompress(res.arena, body.?, encoding) catch {
         res.body = "failed to decompress body";
         res.status = 500;
