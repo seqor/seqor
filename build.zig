@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         }),
         // example to run: zig build test -Dtest-filter="SIGTERM"
         .filters = if (test_filter) |filter| filter else &[_][]const u8{},
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
 
     // build test
