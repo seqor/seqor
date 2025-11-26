@@ -816,41 +816,143 @@ pub const ValuesDecoder = struct {
     }
 };
 
-test "ValuesEncoder.encode" {
+test "ValuesEncoder.encode and decode roundtrip" {
     const allocator = std.testing.allocator;
+    const decode = @import("decode.zig");
+
     const Case = struct {
         values: []const []const u8,
-        expectedType: EncodeValueType,
-        expectedColumnValues: []const []const u8,
+        expectedType: ColumnType,
+        expectedMin: u64,
+        expectedMax: u64,
     };
 
     const cases = [_]Case{
+        // Empty values list
         .{
-            .values = &[_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8" },
-            .expectedType = .{ .min = 0, .max = 8, .type = .uint8 },
-            .expectedColumnValues = &[_][]const u8{},
+            .values = &[_][]const u8{},
+            .expectedType = .string,
+            .expectedMin = 0,
+            .expectedMax = 0,
+        },
+        // String values (more than maxColumnValuesLen = 8)
+        .{
+            .values = &[_][]const u8{
+                "value_0", "value_1", "value_2", "value_3", "value_4",
+                "value_5", "value_6", "value_7", "value_8",
+            },
+            .expectedType = .string,
+            .expectedMin = 0,
+            .expectedMax = 0,
+        },
+        // Dict values
+        .{
+            .values = &[_][]const u8{"foobar"},
+            .expectedType = .dict,
+            .expectedMin = 0,
+            .expectedMax = 0,
+        },
+        .{
+            .values = &[_][]const u8{ "foo", "bar" },
+            .expectedType = .dict,
+            .expectedMin = 0,
+            .expectedMax = 0,
+        },
+        .{
+            .values = &[_][]const u8{ "1", "2foo" },
+            .expectedType = .dict,
+            .expectedMin = 0,
+            .expectedMax = 0,
+        },
+        // uint8 values
+        .{
+            .values = &[_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" },
+            .expectedType = .uint8,
+            .expectedMin = 1,
+            .expectedMax = 9,
+        },
+        // uint16 values
+        .{
+            .values = &[_][]const u8{ "256", "512", "768", "1024", "1280", "1536", "1792", "2048", "2304" },
+            .expectedType = .uint16,
+            .expectedMin = 256,
+            .expectedMax = 2304,
+        },
+        // uint32 values
+        .{
+            .values = &[_][]const u8{ "65536", "131072", "196608", "262144", "327680", "393216", "458752", "524288", "589824" },
+            .expectedType = .uint32,
+            .expectedMin = 65536,
+            .expectedMax = 589824,
+        },
+        // uint64 values
+        .{
+            .values = &[_][]const u8{ "4294967296", "8589934592", "12884901888", "17179869184", "21474836480", "25769803776", "30064771072", "34359738368", "38654705664" },
+            .expectedType = .uint64,
+            .expectedMin = 4294967296,
+            .expectedMax = 38654705664,
+        },
+        // ipv4 values
+        .{
+            .values = &[_][]const u8{ "1.2.3.0", "1.2.3.1", "1.2.3.2", "1.2.3.3", "1.2.3.4", "1.2.3.5", "1.2.3.6", "1.2.3.7", "1.2.3.8" },
+            .expectedType = .ipv4,
+            .expectedMin = 16909056,
+            .expectedMax = 16909064,
+        },
+        // iso8601 timestamps
+        .{
+            .values = &[_][]const u8{
+                "2011-04-19T03:44:01.000Z",
+                "2011-04-19T03:44:01.001Z",
+                "2011-04-19T03:44:01.002Z",
+                "2011-04-19T03:44:01.003Z",
+                "2011-04-19T03:44:01.004Z",
+                "2011-04-19T03:44:01.005Z",
+                "2011-04-19T03:44:01.006Z",
+                "2011-04-19T03:44:01.007Z",
+                "2011-04-19T03:44:01.008Z",
+            },
+            .expectedType = .timestampIso8601,
+            .expectedMin = 1303184641000000000,
+            .expectedMax = 1303184641008000000,
         },
     };
 
-    for (cases) |case| {
+    for (cases, 0..) |case, caseIdx| {
         const encoder = try ValuesEncoder.init(allocator);
         defer encoder.deinit();
 
         var cv = try ColumnValues.init(allocator);
         defer cv.deinit(allocator);
 
-        const valueType = encoder.encode(case.values, &cv);
-        try std.testing.expectEqual(case.expectedType, valueType);
-        try std.testing.expectEqualSlices([]const u8, case.expectedColumnValues, cv.values.items);
-        for (0..case.expectedColumnValues.len) |i| {
-            try std.testing.expectEqualSlices(u8, case.expectedColumnValues[i], cv.values.items[i]);
+        const valueType = try encoder.encode(case.values, &cv);
+        try std.testing.expectEqual(case.expectedType, valueType.type);
+        try std.testing.expectEqual(case.expectedMin, valueType.min);
+        try std.testing.expectEqual(case.expectedMax, valueType.max);
+
+        // Create a copy of encoded values for decoding
+        var encodedValues = try allocator.alloc([]const u8, encoder.values.items.len);
+        defer allocator.free(encodedValues);
+        for (encoder.values.items, 0..) |v, i| {
+            encodedValues[i] = v;
         }
 
-        const encoded = try encoder.encodeValues();
-        const buf = try allocator.alloc(u8, encoded.len);
-        defer allocator.free(buf);
-        var decoder = ValuesDecoder.init(buf);
-        const decoded = try decoder.decodeValues(encoded);
-        try std.testing.expectEqualSlices([]const u8, case.values, decoded.items);
+        // Decode the values
+        const decoder = try decode.ValuesDecoder.init(allocator);
+        defer decoder.deinit();
+
+        try decoder.decodeInplace(encodedValues, valueType.type, cv.values.items);
+
+        // Compare decoded values with original values
+        const expected = if (case.values.len == 0) &[_][]const u8{} else case.values;
+        try std.testing.expectEqual(expected.len, encodedValues.len);
+        for (expected, encodedValues, 0..) |exp, got, i| {
+            std.testing.expectEqualStrings(exp, got) catch |err| {
+                std.debug.print("\nCase {d}: Mismatch at index {d}\n", .{ caseIdx, i });
+                std.debug.print("Expected: '{s}'\n", .{exp});
+                std.debug.print("Got: '{s}'\n", .{got});
+                return err;
+            };
+        }
     }
 }
