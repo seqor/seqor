@@ -748,7 +748,6 @@ test "ValuesEncoder.encode and decode roundtrip" {
 
     for (cases, 0..) |case, caseIdx| {
         const encoder = try ValuesEncoder.init(allocator);
-        defer encoder.deinit();
 
         var cv = try ColumnValues.init(allocator);
         defer cv.deinit(allocator);
@@ -758,35 +757,33 @@ test "ValuesEncoder.encode and decode roundtrip" {
         try std.testing.expectEqual(case.expectedMin, valueType.min);
         try std.testing.expectEqual(case.expectedMax, valueType.max);
 
-        // Create buffers for decoding - allocate individually for each value
-        var decodedBuffers = try allocator.alloc([]u8, encoder.values.items.len);
-        defer {
-            for (decodedBuffers) |buf| allocator.free(buf);
-            allocator.free(decodedBuffers);
-        }
+        // Reuse encoder's memory for decoder
+        const decoder = try decode.ValuesDecoder.init(allocator);
+        defer decoder.deinit();
+        defer encoder.deinit(); // Defer encoder cleanup until after decoder is done
 
+        // Create mutable values array pointing to encoded bytes (before we transfer encoder.values)
         var decodedValues = try allocator.alloc([]u8, encoder.values.items.len);
         defer allocator.free(decodedValues);
 
-        // Each buffer needs space for the decoded string (64 bytes is enough for all types)
+        // Point to encoder.values items (they point into encoder.buf)
         for (encoder.values.items, 0..) |encodedValue, i| {
-            const buf = try allocator.alloc(u8, 64);
-            decodedBuffers[i] = buf;
-            @memcpy(buf[0..encodedValue.len], encodedValue);
-            decodedValues[i] = buf;
+            decodedValues[i] = @constCast(encodedValue);
         }
 
-        // Decode the values in-place
-        const decoder = try decode.ValuesDecoder.init(allocator);
-        defer decoder.deinit();
+        // Transfer encoder's values ArrayList to decoder (decoder takes ownership)
+        decoder.values = encoder.values;
+        decoder.values.clearRetainingCapacity();
+        // Make encoder.values empty so encoder.deinit() won't double-free
+        encoder.values = std.ArrayList([]const u8).empty;
+
+        // Give decoder a separate buffer for writing decoded strings
+        // We can't reuse encoder.buf because it contains the encoded bytes!
+        try decoder.buf.ensureTotalCapacity(allocator, encoder.buf.capacity);
+
+        // Decode the values - decoder reads encoded bytes from decodedValues,
+        // writes strings to decoder.buf, and updates decodedValues pointers
         try decoder.decode(decodedValues, valueType.type, cv.values.items);
-
-        // For string values, trim to original encoded length
-        if (valueType.type == .string) {
-            for (encoder.values.items, 0..) |encodedValue, i| {
-                decodedValues[i] = decodedValues[i][0..encodedValue.len];
-            }
-        }
 
         // Compare decoded values with original values
         const expected = if (case.values.len == 0) &[_][]const u8{} else case.values;
