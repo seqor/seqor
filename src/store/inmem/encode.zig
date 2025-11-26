@@ -644,178 +644,6 @@ fn numbersAreSame(a: []const u64) bool {
     return true;
 }
 
-/// ValuesDecoder reverses the encoding done by ValuesEncoder.encodeValues
-pub const ValuesDecoder = struct {
-    buf: []const u8,
-    offset: usize = 0,
-
-    pub fn init(buf: []const u8) ValuesDecoder {
-        return .{ .buf = buf };
-    }
-
-    /// Read a single value's encoded bytes
-    pub fn readValue(self: *ValuesDecoder, len: usize) ![]const u8 {
-        if (self.offset + len > self.buf.len) {
-            return DecodeError.InsufficientBuffer;
-        }
-        const result = self.buf[self.offset .. self.offset + len];
-        self.offset += len;
-        return result;
-    }
-
-    /// Decompress a section of encoded data (both plain and zstd formats)
-    pub fn decompressSection(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-        if (data.len < 1) return DecodeError.InsufficientBuffer;
-
-        var dec = Decoder.init(data);
-        const compressionKind = try dec.readInt(u8);
-
-        if (compressionKind == ValuesEncoder.compressionKindPlain) {
-            const len = try dec.readInt(u8);
-            const payload = try dec.readBytes(len);
-            return try allocator.dupe(u8, payload);
-        } else if (compressionKind == ValuesEncoder.compressionKindZstd) {
-            // Read the compressed size (leb128 encoded)
-            var compressedSize: u64 = 0;
-            var shift: u6 = 0;
-            while (true) {
-                const byte = try dec.readInt(u8);
-                compressedSize |= @as(u64, @intCast(byte & 0x7f)) << shift;
-                if ((byte & 0x80) == 0) break;
-                shift +|= 7;
-            }
-
-            const compressedPayload = try dec.readBytes(compressedSize);
-
-            // Get the decompressed size from the frame
-            const decompressedSize = compress.getFrameContentSize(compressedPayload) catch |err| {
-                return switch (err) {
-                    compress.DecompressError.Unknown => error.InvalidCompression,
-                    else => error.InvalidCompression,
-                };
-            };
-
-            // Allocate buffer for decompressed data
-            const decompressed = try allocator.alloc(u8, decompressedSize);
-            errdefer allocator.free(decompressed);
-
-            const actualSize = compress.decompress(decompressed, compressedPayload) catch {
-                return error.InvalidCompression;
-            };
-
-            // Return only the actual decompressed portion
-            return decompressed[0..actualSize];
-        } else {
-            return error.InvalidCompression;
-        }
-    }
-
-    /// Decode full encodeValues output and return decoded values
-    /// Returns array of decoded string representations
-    pub fn decodeValues(allocator: std.mem.Allocator, data: []const u8) !std.ArrayList([]const u8) {
-        var result = try std.ArrayList([]const u8).initCapacity(allocator, 10);
-        errdefer result.deinit(allocator);
-
-        var dec = ValuesDecoder.init(data);
-
-        // Read and decompress lengths section
-        const lengthsHeader = try dec.readValue(2);
-        const lengthsSize: usize = lengthsHeader[1];
-
-        dec.offset = 0;
-        const lengthsSectionData = try dec.readValue(2 + lengthsSize);
-        const decompressedLengths = try decompressSection(allocator, lengthsSectionData);
-        defer allocator.free(decompressedLengths);
-
-        // Parse lengths from decompressed data
-        var lengthsDec = Decoder.init(decompressedLengths);
-        const blockTypeOrCell = try lengthsDec.readInt(u8);
-
-        var valueLengths = try std.ArrayList(u64).initCapacity(allocator, 10);
-        defer valueLengths.deinit(allocator);
-
-        const isCellEncoded = blockTypeOrCell >= 4;
-
-        if (isCellEncoded) {
-            // Cell encoding: all values same size, read one value size
-            const cellSize = switch (blockTypeOrCell) {
-                4 => @as(usize, 1), // uint8 cell
-                5 => @as(usize, 2), // uint16 cell
-                6 => @as(usize, 4), // uint32 cell
-                7 => @as(usize, 8), // uint64 cell
-                else => return error.InvalidEncoding,
-            };
-            _ = try lengthsDec.readBytes(cellSize); // read the cell value size
-            // Can't determine count from cell encoding alone, will be determined by values section
-        } else {
-            // Block encoding: each value has its size
-            const valueSize = switch (blockTypeOrCell) {
-                0 => @as(usize, 1), // uint8
-                1 => @as(usize, 2), // uint16
-                2 => @as(usize, 4), // uint32
-                3 => @as(usize, 8), // uint64
-                else => return error.InvalidEncoding,
-            };
-
-            while (lengthsDec.offset < decompressedLengths.len) {
-                const lenBytes = lengthsDec.readBytes(valueSize) catch break;
-                var buf: [8]u8 = undefined;
-                @memcpy(buf[0..valueSize], lenBytes);
-                const lenVal: u64 = switch (valueSize) {
-                    1 => buf[0],
-                    2 => std.mem.bytesAsValue(u16, buf[0..2]).*,
-                    4 => std.mem.bytesAsValue(u32, buf[0..4]).*,
-                    8 => std.mem.bytesAsValue(u64, buf[0..8]).*,
-                    else => 0,
-                };
-                try valueLengths.append(allocator, lenVal);
-            }
-        }
-
-        // Read and decompress values section
-        const valuesSectionStart = 2 + lengthsSize;
-        if (valuesSectionStart >= data.len) return error.InvalidEncoding;
-
-        const valuesSectionHeader = data[valuesSectionStart..@min(valuesSectionStart + 2, data.len)];
-        const valuesSectionSize = if (valuesSectionHeader.len > 1) valuesSectionHeader[1] else 0;
-
-        var valuesDec2 = ValuesDecoder.init(data[valuesSectionStart..]);
-        const valuesSectionData = try valuesDec2.readValue(2 + valuesSectionSize);
-        const decompressedValues = try decompressSection(allocator, valuesSectionData);
-        defer allocator.free(decompressedValues);
-
-        // Extract individual values
-        var valuesOffset: usize = 0;
-        if (isCellEncoded) {
-            // For cell encoding, determine cell size from block type
-            const cellSize = switch (blockTypeOrCell) {
-                4 => @as(usize, 1),
-                5 => @as(usize, 2),
-                6 => @as(usize, 4),
-                7 => @as(usize, 8),
-                else => return error.InvalidEncoding,
-            };
-            // Split values by cell size
-            while (valuesOffset + cellSize <= decompressedValues.len) {
-                const valueBuf = decompressedValues[valuesOffset .. valuesOffset + cellSize];
-                const owned = try allocator.dupe(u8, valueBuf);
-                try result.append(allocator, owned);
-                valuesOffset += cellSize;
-            }
-        } else {
-            for (valueLengths.items) |len| {
-                if (valuesOffset + len > decompressedValues.len) break;
-                const valueBuf = decompressedValues[valuesOffset .. valuesOffset + len];
-                const owned = try allocator.dupe(u8, valueBuf);
-                try result.append(allocator, owned);
-                valuesOffset += len;
-            }
-        }
-
-        return result;
-    }
-};
-
 test "ValuesEncoder.encode and decode roundtrip" {
     const allocator = std.testing.allocator;
     const decode = @import("decode.zig");
@@ -930,23 +758,48 @@ test "ValuesEncoder.encode and decode roundtrip" {
         try std.testing.expectEqual(case.expectedMin, valueType.min);
         try std.testing.expectEqual(case.expectedMax, valueType.max);
 
-        // Create a copy of encoded values for decoding
-        var encodedValues = try allocator.alloc([]const u8, encoder.values.items.len);
-        defer allocator.free(encodedValues);
+        // Allocate buffers for decoded values
+        // Each value needs enough space for the string representation
+        const maxValueSize = 64; // Enough for timestamps and large numbers
+        var decodedBuf = try allocator.alloc(u8, encoder.values.items.len * maxValueSize);
+        defer allocator.free(decodedBuf);
+
+        var decodedValues = try allocator.alloc([]u8, encoder.values.items.len);
+        defer allocator.free(decodedValues);
+
+        // Track original encoded lengths for string values
+        var encodedLengths = try allocator.alloc(usize, encoder.values.items.len);
+        defer allocator.free(encodedLengths);
+
+        // Create mutable slices for each encoded value
+        // Provide full buffer for decode to write string representation
         for (encoder.values.items, 0..) |v, i| {
-            encodedValues[i] = v;
+            encodedLengths[i] = v.len;
+            const offset = i * maxValueSize;
+            const buf = decodedBuf[offset .. offset + maxValueSize];
+            // Copy the encoded bytes into the start of the buffer
+            @memcpy(buf[0..v.len], v);
+            // Pass the full buffer to decode (it will resize to actual string length)
+            decodedValues[i] = buf;
         }
 
         // Decode the values
         const decoder = try decode.ValuesDecoder.init(allocator);
         defer decoder.deinit();
 
-        try decoder.decodeInplace(encodedValues, valueType.type, cv.values.items);
+        try decoder.decode(decodedValues, valueType.type, cv.values.items);
+
+        // For string values, decode doesn't modify them, so trim to original length
+        if (valueType.type == .string) {
+            for (decodedValues, 0..) |*v, i| {
+                v.* = v.*[0..encodedLengths[i]];
+            }
+        }
 
         // Compare decoded values with original values
         const expected = if (case.values.len == 0) &[_][]const u8{} else case.values;
-        try std.testing.expectEqual(expected.len, encodedValues.len);
-        for (expected, encodedValues, 0..) |exp, got, i| {
+        try std.testing.expectEqual(expected.len, decodedValues.len);
+        for (expected, decodedValues, 0..) |exp, got, i| {
             std.testing.expectEqualStrings(exp, got) catch |err| {
                 std.debug.print("\nCase {d}: Mismatch at index {d}\n", .{ caseIdx, i });
                 std.debug.print("Expected: '{s}'\n", .{exp});

@@ -4,155 +4,143 @@ const zeit = @import("zeit");
 const ColumnType = @import("block_header.zig").ColumnType;
 
 /// ValuesDecoder decodes values encoded by ValuesEncoder back to string representations.
-/// The decoded values remain valid until reset() is called.
 pub const ValuesDecoder = struct {
-    buf: std.ArrayList(u8),
+    dictStrings: []const []const u8,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !*ValuesDecoder {
-        const buf = try std.ArrayList(u8).initCapacity(allocator, 512);
         const vd = try allocator.create(ValuesDecoder);
         vd.* = .{
-            .buf = buf,
+            .dictStrings = &[_][]const u8{},
             .allocator = allocator,
         };
         return vd;
     }
 
     pub fn deinit(self: *ValuesDecoder) void {
-        self.buf.deinit(self.allocator);
+        if (self.dictStrings.len > 0) {
+            self.allocator.free(self.dictStrings);
+        }
         self.allocator.destroy(self);
     }
 
     pub fn reset(self: *ValuesDecoder) void {
-        self.buf.clearRetainingCapacity();
+        if (self.dictStrings.len > 0) {
+            self.allocator.free(self.dictStrings);
+            self.dictStrings = &[_][]const u8{};
+        }
     }
 
-    /// Decode values encoded with the given vt and dictValues inplace.
-    /// The decoded values remain valid until reset() is called.
-    /// Values slice is modified in-place to point to decoded string representations.
-    pub fn decodeInplace(
+    /// Decode values encoded with the given vt and dictValues.
+    /// Values slice is modified to decoded string representations.
+    pub fn decode(
         self: *ValuesDecoder,
-        values: [][]const u8,
+        values: [][]u8,
         vt: ColumnType,
         dictValues: []const []const u8,
     ) !void {
-        // Do not reset buf, since it may contain previously decoded data,
-        // which must be preserved until reset() call.
-
         switch (vt) {
             .string => {
-                // Nothing to do - values are already decoded
+                // values are already decoded
             },
             .dict => {
-                // Build temporary dict strings buffer
-                var dictStrings = try std.ArrayList([]const u8).initCapacity(self.allocator, dictValues.len);
-                defer dictStrings.deinit(self.allocator);
-
-                for (dictValues) |v| {
-                    const dstLen = self.buf.items.len;
-                    try self.buf.appendSlice(self.allocator, v);
-                    dictStrings.appendAssumeCapacity(self.buf.items[dstLen..]);
+                // Store dict strings as a field for reuse
+                if (self.dictStrings.len > 0) {
+                    self.allocator.free(self.dictStrings);
                 }
+                self.dictStrings = try self.allocator.dupe([]const u8, dictValues);
 
                 // Map dictionary IDs to actual values
                 for (values, 0..) |v, i| {
-                    if (v.len != 1) {
+                    if (v.len < 1) {
                         return error.InvalidDictValue;
                     }
                     const id: usize = @intCast(v[0]);
-                    if (id >= dictValues.len) {
+                    if (id >= self.dictStrings.len) {
                         return error.DictIdOutOfRange;
                     }
-                    values[i] = dictStrings.items[id];
+                    // Cast away const since we're just updating the pointer
+                    values[i] = @constCast(self.dictStrings[id]);
                 }
             },
             .uint8 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 1) {
+                for (values) |*v| {
+                    if (v.len < 1) {
                         return error.InvalidValueLength;
                     }
-                    const n = unmarshalUint8(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalUint8String(&self.buf, self.allocator, n);
-                    values[i] = self.buf.items[dstLen..];
+                    const n = decodeUint8(v.*);
+                    const len = decodeUint8String(v.*, n);
+                    v.* = v.*[0..len];
                 }
             },
             .uint16 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 2) {
+                for (values) |*v| {
+                    if (v.len < 2) {
                         return error.InvalidValueLength;
                     }
-                    const n = unmarshalUint16(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalUint64String(&self.buf, self.allocator, n);
-                    values[i] = self.buf.items[dstLen..];
+                    const n = decodeUint16(v.*);
+                    const len = decodeUint64String(v.*, n);
+                    v.* = v.*[0..len];
                 }
             },
             .uint32 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 4) {
+                for (values) |*v| {
+                    if (v.len < 4) {
                         return error.InvalidValueLength;
                     }
-                    const n = unmarshalUint32(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalUint64String(&self.buf, self.allocator, n);
-                    values[i] = self.buf.items[dstLen..];
+                    const n = decodeUint32(v.*);
+                    const len = decodeUint64String(v.*, n);
+                    v.* = v.*[0..len];
                 }
             },
             .uint64 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 8) {
+                for (values) |*v| {
+                    if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const n = unmarshalUint64(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalUint64String(&self.buf, self.allocator, n);
-                    values[i] = self.buf.items[dstLen..];
+                    const n = decodeUint64(v.*);
+                    const len = decodeUint64String(v.*, n);
+                    v.* = v.*[0..len];
                 }
             },
             .int64 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 8) {
+                for (values) |*v| {
+                    if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const n = unmarshalInt64(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalInt64String(&self.buf, self.allocator, n);
-                    values[i] = self.buf.items[dstLen..];
+                    const n = decodeInt64(v.*);
+                    const len = decodeInt64String(v.*, n);
+                    v.* = v.*[0..len];
                 }
             },
             .float64 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 8) {
+                for (values) |*v| {
+                    if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const f = unmarshalFloat64(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalFloat64String(&self.buf, self.allocator, f);
-                    values[i] = self.buf.items[dstLen..];
+                    const f = decodeFloat64(v.*);
+                    const len = decodeFloat64String(v.*, f);
+                    v.* = v.*[0..len];
                 }
             },
             .ipv4 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 4) {
+                for (values) |*v| {
+                    if (v.len < 4) {
                         return error.InvalidValueLength;
                     }
-                    const ip = unmarshalIPv4(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalIPv4String(&self.buf, self.allocator, ip);
-                    values[i] = self.buf.items[dstLen..];
+                    const ip = decodeIPv4(v.*);
+                    const len = decodeIPv4String(v.*, ip);
+                    v.* = v.*[0..len];
                 }
             },
             .timestampIso8601 => {
-                for (values, 0..) |v, i| {
-                    if (v.len != 8) {
+                for (values) |*v| {
+                    if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const timestamp = unmarshalTimestampISO8601(v);
-                    const dstLen = self.buf.items.len;
-                    try marshalTimestampISO8601String(&self.buf, self.allocator, timestamp);
-                    values[i] = self.buf.items[dstLen..];
+                    const timestamp = decodeTimestampISO8601(v.*);
+                    const len = try decodeTimestampISO8601String(v.*, timestamp);
+                    v.* = v.*[0..len];
                 }
             },
             else => {
@@ -162,121 +150,117 @@ pub const ValuesDecoder = struct {
     }
 };
 
-// Unmarshal functions
+// Decode binary values to native types
 
-fn unmarshalUint8(v: []const u8) u8 {
+fn decodeUint8(v: []const u8) u8 {
     return v[0];
 }
 
-fn unmarshalUint16(v: []const u8) u16 {
+fn decodeUint16(v: []const u8) u16 {
     return std.mem.bytesToValue(u16, v[0..2]);
 }
 
-fn unmarshalUint32(v: []const u8) u32 {
+fn decodeUint32(v: []const u8) u32 {
     return std.mem.bytesToValue(u32, v[0..4]);
 }
 
-fn unmarshalUint64(v: []const u8) u64 {
+fn decodeUint64(v: []const u8) u64 {
     return std.mem.bytesToValue(u64, v[0..8]);
 }
 
-fn unmarshalInt64(v: []const u8) i64 {
+fn decodeInt64(v: []const u8) i64 {
     return std.mem.bytesToValue(i64, v[0..8]);
 }
 
-fn unmarshalFloat64(v: []const u8) f64 {
-    const n = unmarshalUint64(v);
+fn decodeFloat64(v: []const u8) f64 {
+    const n = decodeUint64(v);
     return @bitCast(n);
 }
 
-fn unmarshalIPv4(v: []const u8) u32 {
-    return unmarshalUint32(v);
+fn decodeIPv4(v: []const u8) u32 {
+    return decodeUint32(v);
 }
 
-fn unmarshalTimestampISO8601(v: []const u8) i64 {
-    const n = unmarshalUint64(v);
+fn decodeTimestampISO8601(v: []const u8) i64 {
+    const n = decodeUint64(v);
     return @bitCast(n);
 }
 
-// Marshal to string functions
+// Decode native types to string representations
+// All functions return the length of the written string
 
-fn marshalUint8String(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, n: u8) !void {
+fn decodeUint8String(dst: []u8, n: u8) usize {
     if (n < 10) {
-        try dst.append(allocator, '0' + n);
-        return;
+        dst[0] = '0' + n;
+        return 1;
     }
     if (n < 100) {
-        try dst.append(allocator, '0' + n / 10);
-        try dst.append(allocator, '0' + n % 10);
-        return;
+        dst[0] = '0' + n / 10;
+        dst[1] = '0' + n % 10;
+        return 2;
     }
 
     if (n < 200) {
-        try dst.append(allocator, '1');
+        dst[0] = '1';
         const rem = n - 100;
         if (rem < 10) {
-            try dst.append(allocator, '0');
-            try dst.append(allocator, '0' + rem);
+            dst[1] = '0';
+            dst[2] = '0' + rem;
         } else {
-            try dst.append(allocator, '0' + rem / 10);
-            try dst.append(allocator, '0' + rem % 10);
+            dst[1] = '0' + rem / 10;
+            dst[2] = '0' + rem % 10;
         }
     } else {
-        try dst.append(allocator, '2');
+        dst[0] = '2';
         const rem = n - 200;
         if (rem < 10) {
-            try dst.append(allocator, '0');
-            try dst.append(allocator, '0' + rem);
+            dst[1] = '0';
+            dst[2] = '0' + rem;
         } else {
-            try dst.append(allocator, '0' + rem / 10);
-            try dst.append(allocator, '0' + rem % 10);
+            dst[1] = '0' + rem / 10;
+            dst[2] = '0' + rem % 10;
         }
     }
+    return 3;
 }
 
-fn marshalUint64String(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, n: u64) !void {
-    var buf: [20]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable;
-    try dst.appendSlice(allocator, str);
+fn decodeUint64String(dst: []u8, n: u64) usize {
+    const str = std.fmt.bufPrint(dst, "{d}", .{n}) catch unreachable;
+    return str.len;
 }
 
-fn marshalInt64String(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, n: i64) !void {
-    var buf: [21]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable;
-    try dst.appendSlice(allocator, str);
+fn decodeInt64String(dst: []u8, n: i64) usize {
+    const str = std.fmt.bufPrint(dst, "{d}", .{n}) catch unreachable;
+    return str.len;
 }
 
-fn marshalFloat64String(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, f: f64) !void {
-    var buf: [64]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, "{d}", .{f}) catch unreachable;
-    try dst.appendSlice(allocator, str);
+fn decodeFloat64String(dst: []u8, f: f64) usize {
+    const str = std.fmt.bufPrint(dst, "{d}", .{f}) catch unreachable;
+    return str.len;
 }
 
-fn marshalIPv4String(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, n: u32) !void {
-    try marshalUint8String(dst, allocator, @intCast((n >> 24) & 0xFF));
-    try dst.append(allocator, '.');
-    try marshalUint8String(dst, allocator, @intCast((n >> 16) & 0xFF));
-    try dst.append(allocator, '.');
-    try marshalUint8String(dst, allocator, @intCast((n >> 8) & 0xFF));
-    try dst.append(allocator, '.');
-    try marshalUint8String(dst, allocator, @intCast(n & 0xFF));
+fn decodeIPv4String(dst: []u8, n: u32) usize {
+    const len1 = decodeUint8String(dst[0..], @intCast((n >> 24) & 0xFF));
+    dst[len1] = '.';
+    const len2 = decodeUint8String(dst[len1 + 1 ..], @intCast((n >> 16) & 0xFF));
+    dst[len1 + 1 + len2] = '.';
+    const len3 = decodeUint8String(dst[len1 + 1 + len2 + 1 ..], @intCast((n >> 8) & 0xFF));
+    dst[len1 + 1 + len2 + 1 + len3] = '.';
+    const len4 = decodeUint8String(dst[len1 + 1 + len2 + 1 + len3 + 1 ..], @intCast(n & 0xFF));
+    return len1 + 1 + len2 + 1 + len3 + 1 + len4;
 }
 
-fn marshalTimestampISO8601String(dst: *std.ArrayList(u8), allocator: std.mem.Allocator, nsecs: i64) !void {
+fn decodeTimestampISO8601String(dst: []u8, nsecs: i64) !usize {
     const instant = try zeit.instant(.{ .source = .{ .unix_nano = nsecs } });
     const time = instant.time();
 
-    // Format: "2006-01-02T15:04:05.000Z" (24 chars) but year can be longer
-    var buf: [64]u8 = undefined;
-
     // Calculate milliseconds within the second from total nanoseconds
-    // Get the nanoseconds within the current second, then convert to millis
     const nsecs_in_second = @mod(nsecs, 1_000_000_000);
     const millis = @divTrunc(@abs(nsecs_in_second), 1_000_000);
 
     // Cast year to unsigned to avoid '+' prefix in formatting
     const year: u16 = if (time.year >= 0) @intCast(time.year) else 0;
-    const str = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+    const str = std.fmt.bufPrint(dst, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
         year,
         time.month,
         time.day,
@@ -285,58 +269,46 @@ fn marshalTimestampISO8601String(dst: *std.ArrayList(u8), allocator: std.mem.All
         time.second,
         millis,
     }) catch unreachable;
-    try dst.appendSlice(allocator, str);
+    return str.len;
 }
 
-test "marshalUint8String" {
-    const allocator = std.testing.allocator;
-    var buf = try std.ArrayList(u8).initCapacity(allocator, 16);
-    defer buf.deinit(allocator);
+test "decodeUint8String" {
+    var buf: [16]u8 = undefined;
 
-    try marshalUint8String(&buf, allocator, 0);
-    try std.testing.expectEqualStrings("0", buf.items);
+    var len = decodeUint8String(&buf, 0);
+    try std.testing.expectEqualStrings("0", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 9);
-    try std.testing.expectEqualStrings("9", buf.items);
+    len = decodeUint8String(&buf, 9);
+    try std.testing.expectEqualStrings("9", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 42);
-    try std.testing.expectEqualStrings("42", buf.items);
+    len = decodeUint8String(&buf, 42);
+    try std.testing.expectEqualStrings("42", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 99);
-    try std.testing.expectEqualStrings("99", buf.items);
+    len = decodeUint8String(&buf, 99);
+    try std.testing.expectEqualStrings("99", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 100);
-    try std.testing.expectEqualStrings("100", buf.items);
+    len = decodeUint8String(&buf, 100);
+    try std.testing.expectEqualStrings("100", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 199);
-    try std.testing.expectEqualStrings("199", buf.items);
+    len = decodeUint8String(&buf, 199);
+    try std.testing.expectEqualStrings("199", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 200);
-    try std.testing.expectEqualStrings("200", buf.items);
+    len = decodeUint8String(&buf, 200);
+    try std.testing.expectEqualStrings("200", buf[0..len]);
 
-    buf.clearRetainingCapacity();
-    try marshalUint8String(&buf, allocator, 255);
-    try std.testing.expectEqualStrings("255", buf.items);
+    len = decodeUint8String(&buf, 255);
+    try std.testing.expectEqualStrings("255", buf[0..len]);
 }
 
-test "marshalIPv4String" {
-    const allocator = std.testing.allocator;
-    var buf = try std.ArrayList(u8).initCapacity(allocator, 16);
-    defer buf.deinit(allocator);
+test "decodeIPv4String" {
+    var buf: [16]u8 = undefined;
 
     // 1.2.3.4 = (1 << 24) | (2 << 16) | (3 << 8) | 4
     const ip: u32 = (1 << 24) | (2 << 16) | (3 << 8) | 4;
-    try marshalIPv4String(&buf, allocator, ip);
-    try std.testing.expectEqualStrings("1.2.3.4", buf.items);
+    var len = decodeIPv4String(&buf, ip);
+    try std.testing.expectEqualStrings("1.2.3.4", buf[0..len]);
 
-    buf.clearRetainingCapacity();
     const ip2: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1;
-    try marshalIPv4String(&buf, allocator, ip2);
-    try std.testing.expectEqualStrings("192.168.1.1", buf.items);
+    len = decodeIPv4String(&buf, ip2);
+    try std.testing.expectEqualStrings("192.168.1.1", buf[0..len]);
 }
