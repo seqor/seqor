@@ -758,41 +758,33 @@ test "ValuesEncoder.encode and decode roundtrip" {
         try std.testing.expectEqual(case.expectedMin, valueType.min);
         try std.testing.expectEqual(case.expectedMax, valueType.max);
 
-        // Allocate buffers for decoded values
-        // Each value needs enough space for the string representation
-        const maxValueSize = 64; // Enough for timestamps and large numbers
-        var decodedBuf = try allocator.alloc(u8, encoder.values.items.len * maxValueSize);
-        defer allocator.free(decodedBuf);
+        // Create buffers for decoding - allocate individually for each value
+        var decodedBuffers = try allocator.alloc([]u8, encoder.values.items.len);
+        defer {
+            for (decodedBuffers) |buf| allocator.free(buf);
+            allocator.free(decodedBuffers);
+        }
 
         var decodedValues = try allocator.alloc([]u8, encoder.values.items.len);
         defer allocator.free(decodedValues);
 
-        // Track original encoded lengths for string values
-        var encodedLengths = try allocator.alloc(usize, encoder.values.items.len);
-        defer allocator.free(encodedLengths);
-
-        // Create mutable slices for each encoded value
-        // Provide full buffer for decode to write string representation
-        for (encoder.values.items, 0..) |v, i| {
-            encodedLengths[i] = v.len;
-            const offset = i * maxValueSize;
-            const buf = decodedBuf[offset .. offset + maxValueSize];
-            // Copy the encoded bytes into the start of the buffer
-            @memcpy(buf[0..v.len], v);
-            // Pass the full buffer to decode (it will resize to actual string length)
+        // Each buffer needs space for the decoded string (64 bytes is enough for all types)
+        for (encoder.values.items, 0..) |encodedValue, i| {
+            const buf = try allocator.alloc(u8, 64);
+            decodedBuffers[i] = buf;
+            @memcpy(buf[0..encodedValue.len], encodedValue);
             decodedValues[i] = buf;
         }
 
-        // Decode the values
+        // Decode the values in-place
         const decoder = try decode.ValuesDecoder.init(allocator);
         defer decoder.deinit();
-
         try decoder.decode(decodedValues, valueType.type, cv.values.items);
 
-        // For string values, decode doesn't modify them, so trim to original length
+        // For string values, trim to original encoded length
         if (valueType.type == .string) {
-            for (decodedValues, 0..) |*v, i| {
-                v.* = v.*[0..encodedLengths[i]];
+            for (encoder.values.items, 0..) |encodedValue, i| {
+                decodedValues[i] = decodedValues[i][0..encodedValue.len];
             }
         }
 

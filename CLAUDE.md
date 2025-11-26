@@ -42,6 +42,24 @@ test "initCapacity" {
 }
 ```
 
+Use slices indexing and length properties instead of pointer arithmetic:
+
+```zig
+test "slice indexing" {
+    const arr: [5]u8 = [_]u8{1, 2, 3, 4, 5};
+    // GOOD
+    for (arr) |value, i| {
+        try testing.expect(value == arr[index]);
+        arr[i] += 1;
+    }
+    // BAD
+    for (arr) |*ptr, index| {
+        try testing.expect(*ptr == arr[index]);
+        ptr.* += 1;
+    }
+}
+```
+
 Use zigdoc to validate the API of the used Zig version, e.g.:
 - zigdoc std.ArrayList
 - zigdoc std.mem.Allocator

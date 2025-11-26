@@ -24,13 +24,6 @@ pub const ValuesDecoder = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn reset(self: *ValuesDecoder) void {
-        if (self.dictStrings.len > 0) {
-            self.allocator.free(self.dictStrings);
-            self.dictStrings = &[_][]const u8{};
-        }
-    }
-
     /// Decode values encoded with the given vt and dictValues.
     /// Values slice is modified to decoded string representations.
     pub fn decode(
@@ -64,83 +57,83 @@ pub const ValuesDecoder = struct {
                 }
             },
             .uint8 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 1) {
                         return error.InvalidValueLength;
                     }
-                    const n = decodeUint8(v.*);
-                    const len = decodeUint8String(v.*, n);
-                    v.* = v.*[0..len];
+                    const n = decodeUint8(v);
+                    const len = decodeUint8String(values[i], n);
+                    values[i] = values[i][0..len];
                 }
             },
             .uint16 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 2) {
                         return error.InvalidValueLength;
                     }
-                    const n = decodeUint16(v.*);
-                    const len = decodeUint64String(v.*, n);
-                    v.* = v.*[0..len];
+                    const n = decodeUint16(v);
+                    const len = decodeUint64String(values[i], n);
+                    values[i] = values[i][0..len];
                 }
             },
             .uint32 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 4) {
                         return error.InvalidValueLength;
                     }
-                    const n = decodeUint32(v.*);
-                    const len = decodeUint64String(v.*, n);
-                    v.* = v.*[0..len];
+                    const n = decodeUint32(v);
+                    const len = decodeUint64String(values[i], n);
+                    values[i] = values[i][0..len];
                 }
             },
             .uint64 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const n = decodeUint64(v.*);
-                    const len = decodeUint64String(v.*, n);
-                    v.* = v.*[0..len];
+                    const n = decodeUint64(v);
+                    const len = decodeUint64String(values[i], n);
+                    values[i] = values[i][0..len];
                 }
             },
             .int64 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const n = decodeInt64(v.*);
-                    const len = decodeInt64String(v.*, n);
-                    v.* = v.*[0..len];
+                    const n = decodeInt64(v);
+                    const len = decodeInt64String(values[i], n);
+                    values[i] = values[i][0..len];
                 }
             },
             .float64 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const f = decodeFloat64(v.*);
-                    const len = decodeFloat64String(v.*, f);
-                    v.* = v.*[0..len];
+                    const f = decodeFloat64(v);
+                    const len = decodeFloat64String(values[i], f);
+                    values[i] = values[i][0..len];
                 }
             },
             .ipv4 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 4) {
                         return error.InvalidValueLength;
                     }
-                    const ip = decodeIPv4(v.*);
-                    const len = decodeIPv4String(v.*, ip);
-                    v.* = v.*[0..len];
+                    const ip = decodeIPv4(v);
+                    const len = decodeIPv4String(values[i], ip);
+                    values[i] = values[i][0..len];
                 }
             },
             .timestampIso8601 => {
-                for (values) |*v| {
+                for (values, 0..) |v, i| {
                     if (v.len < 8) {
                         return error.InvalidValueLength;
                     }
-                    const timestamp = decodeTimestampISO8601(v.*);
-                    const len = try decodeTimestampISO8601String(v.*, timestamp);
-                    v.* = v.*[0..len];
+                    const timestamp = decodeTimestampISO8601(v);
+                    const len = try decodeTimestampISO8601String(values[i], timestamp);
+                    values[i] = values[i][0..len];
                 }
             },
             else => {
