@@ -112,7 +112,11 @@ pub const Block = struct {
     }
 
     fn put(self: *Block, allocator: std.mem.Allocator, lines: []*const Line) !void {
-        // TODO: implement fast path when lines have same fields
+
+        // If len is zero, nothing to do.
+        if (lines.len == 0) {
+            return;
+        }
 
         var columnI = std.StringHashMap(usize).init(allocator);
         defer columnI.deinit();
@@ -176,4 +180,79 @@ pub const Block = struct {
         std.mem.sortUnstable(Column, self.getColumns(), {}, columnLessThan);
         std.mem.sortUnstable(Column, self.getCelledColumns(), {}, columnLessThan);
     }
+
+    fn areSameFields(lines: []*const Line) bool {
+        if (lines.len == 0) {
+            return true;
+        }
+
+        const firstLine = lines[0];
+        for (lines[1..]) |line| {
+            if (line.fields.len != firstLine.fields.len) {
+                return false;
+            }
+
+            for (firstLine.fields, 0..) |field, i| {
+                if (!std.mem.eql(u8, field.key, line.fields[i].key)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
 };
+
+test "areSameFields: happy path" {
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 1,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 2,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    try std.testing.expectEqual(true, Block.areSameFields(&lines));
+}
+
+test "areSameFields: unhappy path" {
+    var fields1 = [_]Field{
+        .{ .key = "cpu", .value = "0.1" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 1,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 2,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    try std.testing.expectEqual(false, Block.areSameFields(&lines));
+}
