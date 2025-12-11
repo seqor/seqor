@@ -201,6 +201,29 @@ pub const Block = struct {
 
         return true;
     }
+
+    fn canBeSavedAsCelled(lines: []*const Line, index: u8) bool {
+        // If len is zero, then there's nothing to do.
+        if (lines.len == 0) {
+            return true;
+        }
+
+        const value = lines[0].fields[index].value;
+
+        // If value is too large, then we consider it not celled.
+        // Not sure if this would work though?
+        if (value.len > maxCelledColumnValueSize) {
+            return false;
+        }
+
+        for (lines[1..]) |line| {
+            if (std.mem.eql(u8, line.fields[index].value, value) == false) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 };
 
 test "areSameFields: happy path" {
@@ -255,4 +278,58 @@ test "areSameFields: unhappy path" {
     };
 
     try std.testing.expectEqual(false, Block.areSameFields(&lines));
+}
+
+test "areSameValuesWithinColumn: happy path" {
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 1,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 2,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    try std.testing.expectEqual(true, Block.canBeSavedAsCelled(&lines, 0));
+}
+
+test "areSameValuesWithinColumn: unhappy path" {
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 1,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 2,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    try std.testing.expectEqual(false, Block.canBeSavedAsCelled(&lines, 0));
 }
