@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zeit = @import("zeit");
+const zint = @import("zint");
 
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
@@ -8,8 +9,26 @@ const Encoder = encoding.Encoder;
 const ColumnDict = @import("block_header.zig").ColumnDict;
 const ColumnType = @import("block_header.zig").ColumnType;
 
+const Zint = zint.Zint;
+
+fn encodeTimestampsWithZint(allocator: std.mem.Allocator, tss: []u64) ![]u8 {
+    if (tss.len > std.math.maxInt(u32)) {
+        return error.InputTooLarge;
+    }
+    const len: u32 = @intCast(tss.len);
+
+    const ctx = zint.Ctx.init(allocator) catch unreachable;
+    defer ctx.deinit(allocator);
+
+    const Z = zint.Zint(u64);
+    const compress_buf = try allocator.alloc(u8, Z.deltapack_compress_bound(len));
+    const compressed_size = try Z.deltapack_compress(ctx, tss, compress_buf);
+
+    return compress_buf[0..compressed_size];
+}
+
 pub fn encodeTimestamps(allocator: std.mem.Allocator, tss: []u64) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{any}", .{tss});
+    return encodeTimestampsWithZint(allocator, tss);
 }
 
 pub const EncodeValueType = struct {
