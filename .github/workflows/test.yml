@@ -8,20 +8,9 @@ on:
 
 jobs:
   test:
-    name: Run Tests
     runs-on: ubuntu-latest
-    
+    name: Build and Test
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.15.1
-      
-      - name: Build
-        run: zig build
-      
-      - name: Run tests
-        run: zig build test
+      - uses: actions/checkout@v3
+      - uses: https://codeberg.org/mlugg/setup-zig@v2
+      - run: zig build test
