@@ -12,5 +12,5 @@ jobs:
     name: Build and Test
     steps:
       - uses: actions/checkout@v3
-      - uses: https://codeberg.org/mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
       - run: zig build test
