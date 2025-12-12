@@ -112,12 +112,68 @@ pub const Block = struct {
     }
 
     fn put(self: *Block, allocator: std.mem.Allocator, lines: []*const Line) !void {
-
         // If len is zero, nothing to do.
         if (lines.len == 0) {
             return;
         }
 
+        // Fast path if all lines have the same fields
+        if (Block.areSameFields(lines)) {
+            // Extract timestamps
+            for (lines, 0..) |line, i| {
+                self.timestamps[i] = line.timestampNs;
+            }
+
+            // All lines have same fields, process each field column
+            const firstLine = lines[0];
+            var columns = try allocator.alloc(Column, firstLine.fields.len);
+            errdefer allocator.free(columns);
+
+            @memset(columns, .{ .key = "", .values = &[_][]u8{} });
+            errdefer {
+                for (columns) |col| {
+                    if (col.values.len != 0) {
+                        allocator.free(col.values);
+                    }
+                }
+            }
+
+            var celledCount: usize = 0;
+            for (firstLine.fields, 0..) |field, fieldIdx| {
+                var col = &columns[fieldIdx];
+                col.key = field.key;
+
+                if (Block.canBeSavedAsCelled(lines, fieldIdx)) {
+                    // Constant column - store single value
+                    col.values = try allocator.alloc([]const u8, 1);
+                    col.values[0] = field.value;
+                    celledCount += 1;
+                } else {
+                    // Variable column - store all values
+                    col.values = try allocator.alloc([]const u8, lines.len);
+                    for (lines, 0..) |line, lineIdx| {
+                        col.values[lineIdx] = line.fields[fieldIdx].value;
+                    }
+                }
+            }
+
+            // Partition: regular columns first, celled columns last
+            self.firstCelled = @intCast(columns.len - celledCount);
+            var i: usize = 0;
+            while (i < self.firstCelled) {
+                if (columns[i].isCelled()) {
+                    self.firstCelled -= 1;
+                    std.mem.swap(Column, &columns[i], &columns[self.firstCelled]);
+                } else {
+                    i += 1;
+                }
+            }
+
+            self.columns = columns;
+            return;
+        }
+
+        // Builds hash map of unique column keys to their index
         var columnI = std.StringHashMap(usize).init(allocator);
         defer columnI.deinit();
         for (lines, 0..) |line, i| {
@@ -132,9 +188,11 @@ pub const Block = struct {
             self.timestamps[i] = line.timestampNs;
         }
 
+        // Allocates column with number of unique fields
         var columns = try allocator.alloc(Column, columnI.count());
         errdefer allocator.free(columns);
 
+        // Assigns empty keys and values to columns
         @memset(columns, .{ .key = "", .values = &[_][]u8{} });
         errdefer {
             for (columns) |col| {
@@ -143,6 +201,7 @@ pub const Block = struct {
                 }
             }
         }
+
         var columnIter = columnI.iterator();
         while (columnIter.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -202,7 +261,7 @@ pub const Block = struct {
         return true;
     }
 
-    fn canBeSavedAsCelled(lines: []*const Line, index: u8) bool {
+    fn canBeSavedAsCelled(lines: []*const Line, index: usize) bool {
         // If len is zero, then there's nothing to do.
         if (lines.len == 0) {
             return true;
