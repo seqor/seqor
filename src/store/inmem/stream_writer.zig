@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const encode = @import("encode.zig");
+const ValuesEncoder = @import("ValuesEncoder.zig");
 
 const Block = @import("block.zig").Block;
 const Column = @import("block.zig").Column;
@@ -8,7 +8,10 @@ const BlockHeader = @import("block_header.zig").BlockHeader;
 const ColumnsHeader = @import("block_header.zig").ColumnsHeader;
 const ColumnHeader = @import("block_header.zig").ColumnHeader;
 const TimestampsHeader = @import("block_header.zig").TimestampsHeader;
-const Encoder = @import("encode.zig").Encoder;
+const Encoder = @import("encoding").Encoder;
+const Packer = @import("Packer.zig");
+const ColumnsHeaderIndex = @import("ColumnsHeaderIndex.zig");
+const ColumnIDGen = @import("ColumnIDGen.zig");
 
 const maxPackedValuesSize = 8 * 1024 * 1024;
 
@@ -20,12 +23,18 @@ pub const StreamWriter = struct {
     const tsBufferSize = 2 * 1024;
     const indexBufferSize = 2 * 1024;
     const metaIndexBufferSize = 2 * 1024;
+    const columnsHeaderBufferSize = 2 * 1024;
+    const columnsHeaderIndexBufferSize = 2 * 1024;
     const messageBloomValuesSize = 2 * 1024;
+    const messageBloomTokensSize = 2 * 1024;
 
     // TODO: expose metrics on len/cap relations
-    timestampsBuffer: std.ArrayList(u8),
-    indexBuffer: std.ArrayList(u8),
+    timestampsBuf: std.ArrayList(u8),
+    indexBuf: std.ArrayList(u8),
     metaIndexBuf: std.ArrayList(u8),
+
+    columnsHeaderBuf: std.ArrayList(u8),
+    columnsHeaderIndexBuf: std.ArrayList(u8),
 
     messageBloomValuesBuf: std.ArrayList(u8),
     messageBloomTokensBuf: std.ArrayList(u8),
@@ -45,9 +54,14 @@ pub const StreamWriter = struct {
         var metaIndexBuf = try std.ArrayList(u8).initCapacity(allocator, metaIndexBufferSize);
         errdefer metaIndexBuf.deinit(allocator);
 
+        var columnsHeaderBuf = try std.ArrayList(u8).initCapacity(allocator, columnsHeaderBufferSize);
+        errdefer columnsHeaderBuf.deinit(allocator);
+        var columnsHeaderIndexBuf = try std.ArrayList(u8).initCapacity(allocator, columnsHeaderIndexBufferSize);
+        errdefer columnsHeaderIndexBuf.deinit(allocator);
+
         var msgBloomValuesBuf = try std.ArrayList(u8).initCapacity(allocator, messageBloomValuesSize);
         errdefer msgBloomValuesBuf.deinit(allocator);
-        var msgBloomTokensBuf = try std.ArrayList(u8).initCapacity(allocator, messageBloomValuesSize);
+        var msgBloomTokensBuf = try std.ArrayList(u8).initCapacity(allocator, messageBloomTokensSize);
         errdefer msgBloomTokensBuf.deinit(allocator);
         var bloomValuesList = try std.ArrayList(std.ArrayList(u8)).initCapacity(allocator, maxColI);
         errdefer bloomValuesList.deinit(allocator);
@@ -60,9 +74,12 @@ pub const StreamWriter = struct {
 
         const w = try allocator.create(StreamWriter);
         w.* = StreamWriter{
-            .timestampsBuffer = timestampsBuffer,
-            .indexBuffer = indexBuffer,
+            .timestampsBuf = timestampsBuffer,
+            .indexBuf = indexBuffer,
             .metaIndexBuf = metaIndexBuf,
+
+            .columnsHeaderBuf = columnsHeaderBuf,
+            .columnsHeaderIndexBuf = columnsHeaderIndexBuf,
 
             .messageBloomValuesBuf = msgBloomValuesBuf,
             .messageBloomTokensBuf = msgBloomTokensBuf,
@@ -78,9 +95,13 @@ pub const StreamWriter = struct {
     }
 
     pub fn deinit(self: *StreamWriter, allocator: std.mem.Allocator) void {
-        self.timestampsBuffer.deinit(allocator);
-        self.indexBuffer.deinit(allocator);
+        self.timestampsBuf.deinit(allocator);
+        self.indexBuf.deinit(allocator);
         self.metaIndexBuf.deinit(allocator);
+
+        self.columnsHeaderBuf.deinit(allocator);
+        self.columnsHeaderIndexBuf.deinit(allocator);
+
         self.messageBloomValuesBuf.deinit(allocator);
         self.messageBloomTokensBuf.deinit(allocator);
         for (self.bloomValuesList.items) |*bv| {
@@ -91,6 +112,7 @@ pub const StreamWriter = struct {
             bv.deinit(allocator);
         }
         self.bloomTokensList.deinit(allocator);
+
         self.columnIDGen.deinit(allocator);
         self.colIdx.deinit();
         allocator.destroy(self);
@@ -106,10 +128,17 @@ pub const StreamWriter = struct {
 
         const columnsHeader = try ColumnsHeader.init(allocator, block);
         defer columnsHeader.deinit(allocator);
-        for (block.getColumns(), 0..) |col, i| {
-            var header = columnsHeader.headers[i];
-            try self.writeColumnHeader(allocator, col, &header);
+        const columns = block.getColumns();
+        try self.columnIDGen.keyIDs.ensureUnusedCapacity(columns.len);
+        try self.colIdx.ensureUnusedCapacity(@intCast(columns.len));
+        try self.bloomValuesList.ensureUnusedCapacity(allocator, columns.len);
+        try self.bloomTokensList.ensureUnusedCapacity(allocator, columns.len);
+
+        for (columns, 0..) |col, i| {
+            try self.writeColumnHeader(allocator, col, &columnsHeader.headers[i]);
         }
+
+        try self.writeColumnsHeader(allocator, columnsHeader, blockHeader);
     }
 
     fn writeTimestamps(
@@ -122,32 +151,34 @@ pub const StreamWriter = struct {
             return Error.EmptyTimestamps;
         }
         // TODO: pass static buffer instead of allocator
-        const encodedTimestamps = try encode.encodeTimestamps(allocator, timestamps);
-        defer allocator.free(encodedTimestamps);
-        // TODO: write tsHeader data from encodedTimestamps
+        const encodedTimestamps = try ValuesEncoder.encodeTimestamps(allocator, timestamps);
+        defer allocator.free(encodedTimestamps.buf);
 
         tsHeader.min = timestamps[0];
         tsHeader.max = timestamps[timestamps.len - 1];
-        tsHeader.offset = self.timestampsBuffer.items.len;
-        tsHeader.size = encodedTimestamps.len;
+        tsHeader.offset = self.timestampsBuf.items.len;
+        tsHeader.size = encodedTimestamps.buf.len;
+        tsHeader.encodingType = encodedTimestamps.encodingType;
 
-        try self.timestampsBuffer.appendSlice(allocator, encodedTimestamps);
+        try self.timestampsBuf.appendSlice(allocator, encodedTimestamps.buf);
     }
 
     fn writeColumnHeader(self: *StreamWriter, allocator: std.mem.Allocator, col: Column, ch: *ColumnHeader) !void {
         ch.key = col.key;
 
-        const valuesEncoder = try encode.ValuesEncoder.init(allocator);
+        const valuesEncoder = try ValuesEncoder.init(allocator);
         defer valuesEncoder.deinit();
         const valueType = try valuesEncoder.encode(col.values, &ch.dict);
         ch.type = valueType.type;
         ch.min = valueType.min;
         ch.max = valueType.max;
-        const packedValues = try valuesEncoder.packValues(valuesEncoder.values.items);
+        const packer = try Packer.init(allocator);
+        defer packer.deinit();
+        const packedValues = try packer.packValues(valuesEncoder.values.items);
         defer allocator.free(packedValues);
         std.debug.assert(packedValues.len <= maxPackedValuesSize);
 
-        const bloomBufI = self.getBloomBufferIndex(allocator, ch.key);
+        const bloomBufI = self.getBloomBufferIndex(ch.key);
         const bloomValuesBuf = if (bloomBufI) |i| &self.bloomValuesList.items[i] else |err| switch (err) {
             error.MessageBloomMustBeUsed => &self.messageBloomValuesBuf,
             else => return err,
@@ -181,12 +212,12 @@ pub const StreamWriter = struct {
         try bloomTokensBuf.appendSlice(allocator, bloomHash);
     }
 
-    fn getBloomBufferIndex(self: *StreamWriter, allocator: std.mem.Allocator, key: []const u8) !u16 {
+    fn getBloomBufferIndex(self: *StreamWriter, key: []const u8) error{MessageBloomMustBeUsed}!u16 {
         if (key.len == 0) {
             return error.MessageBloomMustBeUsed;
         }
 
-        const colID = try self.columnIDGen.genID(key);
+        const colID = self.columnIDGen.genIDAssumeCapacity(key);
         const maybeColI = self.colIdx.get(colID);
         if (maybeColI) |colI| {
             return colI;
@@ -195,43 +226,43 @@ pub const StreamWriter = struct {
         // at the moment implemented only for an in mem table, so we assume max col i is ever 1
         const colI = self.nextColI % self.maxColI;
         self.nextColI += 1;
-        try self.colIdx.put(colID, colI);
+        self.colIdx.putAssumeCapacity(colID, colI);
 
         if (colI >= self.bloomValuesList.items.len) {
-            try self.bloomValuesList.append(allocator, std.ArrayList(u8).empty);
-            try self.bloomTokensList.append(allocator, std.ArrayList(u8).empty);
+            self.bloomValuesList.appendAssumeCapacity(std.ArrayList(u8).empty);
+            self.bloomTokensList.appendAssumeCapacity(std.ArrayList(u8).empty);
         }
 
         return colI;
     }
-};
 
-pub const ColumnIDGen = struct {
-    keyIDs: std.StringArrayHashMap(u16),
+    fn writeColumnsHeader(
+        self: *StreamWriter,
+        allocator: std.mem.Allocator,
+        csh: *ColumnsHeader,
+        bh: *BlockHeader,
+    ) !void {
+        var cshIdx = try ColumnsHeaderIndex.init(allocator);
+        defer cshIdx.deinit(allocator);
 
-    pub fn init(allocator: std.mem.Allocator) !*ColumnIDGen {
-        const nameIDs = std.StringArrayHashMap(u16).init(allocator);
-        const s = try allocator.create(ColumnIDGen);
-        s.* = ColumnIDGen{
-            .keyIDs = nameIDs,
-        };
-        return s;
-    }
+        const dstSize = csh.encodeBound();
+        const dstIdxSize = cshIdx.encodeBound();
+        const dst = try allocator.alloc(u8, dstSize + dstIdxSize);
+        defer allocator.free(dst);
 
-    pub fn deinit(self: *ColumnIDGen, allocator: std.mem.Allocator) void {
-        self.keyIDs.deinit();
-        allocator.destroy(self);
-    }
+        try cshIdx.columns.ensureUnusedCapacity(allocator, csh.headers.len);
+        try cshIdx.celledColumns.ensureUnusedCapacity(allocator, csh.celledColumns.len);
+        try self.columnIDGen.keyIDs.ensureUnusedCapacity(csh.celledColumns.len);
+        const cshOffset = csh.encode(dst, cshIdx, self.columnIDGen);
+        const cshIdxOffset = cshIdx.encode(dst[cshOffset..]);
 
-    pub fn genID(self: *ColumnIDGen, key: []const u8) !u16 {
-        const maybeID = self.keyIDs.get(key);
-        if (maybeID) |id| {
-            return id;
-        }
+        bh.columnsHeaderOffset = self.columnsHeaderBuf.items.len;
+        bh.columnsHeaderSize = cshOffset;
+        try self.columnsHeaderBuf.appendSlice(allocator, dst[0..cshOffset]);
 
-        const id: u16 = @intCast(self.keyIDs.count());
-        try self.keyIDs.put(key, id);
-        return id;
+        bh.columnsHeaderIndexOffset = self.columnsHeaderIndexBuf.items.len;
+        bh.columnsHeaderIndexSize = cshIdxOffset;
+        try self.columnsHeaderIndexBuf.appendSlice(allocator, dst[cshOffset .. cshOffset + cshIdxOffset]);
     }
 };
 

@@ -7,67 +7,68 @@ const fieldLessThan = @import("../lines.zig").fieldLessThan;
 const SID = @import("../lines.zig").SID;
 
 const StreamWriter = @import("stream_writer.zig").StreamWriter;
-const BlockWriter = @import("block_writer.zig").BlockWriter;
+const BlockWriter = @import("BlockWriter.zig");
+const ValuesDecoder = @import("ValuesDecoder.zig");
 
 // 2mb block size, on merging it takes double amount up to 4mb
+// TODO: benchmark whether 2.5-3kb performs better
 const maxBlockSize = 2 * 1024 * 1024;
 
 pub const Error = error{
     EmptyLines,
 };
 
-pub const MemTable = struct {
-    streamWriter: *StreamWriter,
+const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) !*MemTable {
-        const p = try allocator.create(MemTable);
-        errdefer allocator.destroy(p);
-        const streamWriter = try StreamWriter.init(allocator, 1);
-        p.* = MemTable{
-            .streamWriter = streamWriter,
-        };
+streamWriter: *StreamWriter,
 
-        return p;
+pub fn init(allocator: std.mem.Allocator) !*Self {
+    const p = try allocator.create(Self);
+    errdefer allocator.destroy(p);
+    const streamWriter = try StreamWriter.init(allocator, 1);
+    p.* = Self{
+        .streamWriter = streamWriter,
+    };
+
+    return p;
+}
+pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    self.streamWriter.deinit(allocator);
+    allocator.destroy(self);
+}
+
+pub fn addLines(self: *Self, allocator: std.mem.Allocator, lines: []*const Line) !void {
+    if (lines.len == 0) {
+        return Error.EmptyLines;
     }
-    pub fn deinit(self: *MemTable, allocator: std.mem.Allocator) void {
-        self.streamWriter.deinit(allocator);
-        allocator.destroy(self);
+
+    var blockWriter = try BlockWriter.init(allocator);
+    defer blockWriter.deinit(allocator);
+
+    var streamI: usize = 0;
+    var blockSize: u32 = 0;
+    var prevSID: SID = lines[0].sid;
+
+    std.mem.sortUnstable(*const Line, lines, {}, lineLessThan);
+    for (lines, 0..) |line, i| {
+        std.mem.sortUnstable(Field, line.fields, {}, fieldLessThan);
+
+        if (blockSize >= maxBlockSize or !line.sid.eql(&prevSID)) {
+            try blockWriter.writeLines(allocator, prevSID, lines[streamI..i], self.streamWriter);
+            prevSID = line.sid;
+            blockSize = 0;
+            streamI = i;
+        }
+        blockSize += line.fieldsSize();
     }
-
-    pub fn addLines(self: *MemTable, allocator: std.mem.Allocator, lines: []*const Line) !void {
-        if (lines.len == 0) {
-            return Error.EmptyLines;
-        }
-
-        var blockWriter = try BlockWriter.init(allocator);
-        defer blockWriter.deinit(allocator);
-
-        var streamI: u32 = 0;
-        var blockSize: u32 = 0;
-        var prevSID: SID = lines[0].sid;
-
-        std.mem.sortUnstable(*const Line, lines, {}, lineLessThan);
-        for (lines, 0..) |line, i| {
-            std.mem.sortUnstable(Field, line.fields, {}, fieldLessThan);
-
-            if (blockSize >= maxBlockSize or !line.sid.eql(&prevSID)) {
-                try blockWriter.writeLines(allocator, prevSID, lines[streamI..i], self.streamWriter);
-                prevSID = line.sid;
-                blockSize = 0;
-                streamI = @intCast(i);
-            }
-            blockSize += line.fieldsLen();
-        }
-        if (streamI != lines.len) {
-            try blockWriter.writeLines(allocator, prevSID, lines[streamI..], self.streamWriter);
-        }
-        try blockWriter.finish(allocator, self.streamWriter);
+    if (streamI != lines.len) {
+        try blockWriter.writeLines(allocator, prevSID, lines[streamI..], self.streamWriter);
     }
-};
+    try blockWriter.finish(allocator, self.streamWriter);
+}
 
-const encode = @import("encode.zig");
 const BlockHeader = @import("block_header.zig").BlockHeader;
-const IndexBlockHeader = @import("index_block_header.zig").IndexBlockHeader;
+const IndexBlockHeader = @import("IndexBlockHeader.zig");
 
 test "addLines" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testAddLines, .{});
@@ -82,31 +83,32 @@ fn testAddLines(allocator: std.mem.Allocator) !void {
         .{ .key = "level", .value = "warn" },
         .{ .key = "app", .value = "seq" },
     };
+    // unordered timestamps in lines so that it tests its sorting
     var lines = [_]*const Line{
-        &.{
-            .timestampNs = 1,
-            .sid = .{ .id = 1, .tenantID = "1234" },
-            .fields = fields1[0..],
-            .encodedTags = undefined,
-        },
         &.{
             .timestampNs = 2,
             .sid = .{ .id = 1, .tenantID = "1234" },
             .fields = fields2[0..],
             .encodedTags = undefined,
         },
+        &.{
+            .timestampNs = 1,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
     };
 
-    const memTable = try MemTable.init(allocator);
+    const memTable = try Self.init(allocator);
     defer memTable.deinit(allocator);
     try memTable.addLines(allocator, lines[0..]);
 
-    const timestampsContent = memTable.streamWriter.timestampsBuffer.items;
-    const indexContent = memTable.streamWriter.indexBuffer.items;
+    const timestampsContent = memTable.streamWriter.timestampsBuf.items;
+    const indexContent = memTable.streamWriter.indexBuf.items;
 
     // Validate timestamps
     {
-        var decodedTimestamps = try encode.decodeTimestamps(allocator, timestampsContent);
+        var decodedTimestamps = try ValuesDecoder.decodeTimestamps(allocator, timestampsContent);
         defer decodedTimestamps.deinit(allocator);
 
         try std.testing.expectEqualDeep(&[_]u64{ 1, 2 }, decodedTimestamps.items);
@@ -163,7 +165,7 @@ fn testAddLines(allocator: std.mem.Allocator) !void {
 
 test "addLinesErrorOnEmpty" {
     var lines = [_]*const Line{};
-    const memTable = try MemTable.init(std.testing.allocator);
+    const memTable = try Self.init(std.testing.allocator);
     defer memTable.deinit(std.testing.allocator);
     const err = memTable.addLines(std.testing.allocator, lines[0..]);
     try std.testing.expectError(Error.EmptyLines, err);
