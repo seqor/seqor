@@ -104,7 +104,7 @@ pub const Block = struct {
                     continue;
                 }
 
-                res += (lineSurroundSize + col.key.len + val.len) * self.timestamps.len;
+                res += lineSurroundSize + col.key.len + val.len;
             }
         }
 
@@ -138,36 +138,46 @@ pub const Block = struct {
                 }
             }
 
+            // First pass: identify which columns are celled
+            var celledMask = try allocator.alloc(bool, firstLine.fields.len);
+            defer allocator.free(celledMask);
+
             var celledCount: usize = 0;
+            for (firstLine.fields, 0..) |_, fieldIdx| {
+                if (Block.canBeSavedAsCelled(lines, fieldIdx)) {
+                    celledMask[fieldIdx] = true;
+                    celledCount += 1;
+                } else {
+                    celledMask[fieldIdx] = false;
+                }
+            }
+
+            // Second pass: populate columns with regular columns first, then celled
+            var regularIdx: usize = 0;
+            var celledIdx: usize = firstLine.fields.len - celledCount;
+
             for (firstLine.fields, 0..) |field, fieldIdx| {
-                var col = &columns[fieldIdx];
+                const isFieldCelled = celledMask[fieldIdx];
+                const targetIdx = if (isFieldCelled) celledIdx else regularIdx;
+                var col = &columns[targetIdx];
                 col.key = field.key;
 
-                if (Block.canBeSavedAsCelled(lines, fieldIdx)) {
+                if (isFieldCelled) {
                     // Constant column - store single value
                     col.values = try allocator.alloc([]const u8, 1);
                     col.values[0] = field.value;
-                    celledCount += 1;
+                    celledIdx += 1;
                 } else {
                     // Variable column - store all values
                     col.values = try allocator.alloc([]const u8, lines.len);
                     for (lines, 0..) |line, lineIdx| {
                         col.values[lineIdx] = line.fields[fieldIdx].value;
                     }
+                    regularIdx += 1;
                 }
             }
 
-            // Partition: regular columns first, celled columns last
-            self.firstCelled = @intCast(columns.len - celledCount);
-            var i: usize = 0;
-            while (i < self.firstCelled) {
-                if (columns[i].isCelled()) {
-                    self.firstCelled -= 1;
-                    std.mem.swap(Column, &columns[i], &columns[self.firstCelled]);
-                } else {
-                    i += 1;
-                }
-            }
+            self.firstCelled = @intCast(firstLine.fields.len - celledCount);
 
             self.columns = columns;
             return;
@@ -210,6 +220,8 @@ pub const Block = struct {
             var col = &columns[idx];
             col.key = key;
             col.values = try allocator.alloc([]const u8, lines.len);
+            // Initialize all values to empty string
+            @memset(col.values, "");
         }
 
         for (lines, 0..) |line, i| {
@@ -391,4 +403,365 @@ test "areSameValuesWithinColumn: unhappy path" {
     };
 
     try std.testing.expectEqual(false, Block.canBeSavedAsCelled(&lines, 0));
+}
+
+test "put: empty lines array" {
+    const allocator = std.testing.allocator;
+    const timestamps = try allocator.alloc(u64, 0);
+    defer allocator.free(timestamps);
+
+    var block = Block{
+        .firstCelled = undefined,
+        .columns = undefined,
+        .timestamps = timestamps,
+    };
+
+    // Should not error on empty lines
+    try block.put(allocator, &[_]*const Line{});
+}
+
+test "put: fast path with same fields and all celled columns" {
+    const allocator = std.testing.allocator;
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 100,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 200,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    const timestamps = try allocator.alloc(u64, lines.len);
+    defer allocator.free(timestamps);
+
+    var block = Block{
+        .firstCelled = undefined,
+        .columns = undefined,
+        .timestamps = timestamps,
+    };
+
+    try block.put(allocator, &lines);
+    defer {
+        for (block.columns) |col| {
+            allocator.free(col.values);
+        }
+        allocator.free(block.columns);
+    }
+
+    // Check timestamps
+    try std.testing.expectEqual(100, block.timestamps[0]);
+    try std.testing.expectEqual(200, block.timestamps[1]);
+
+    // All columns should be celled (same values)
+    try std.testing.expectEqual(0, block.firstCelled);
+    try std.testing.expectEqual(2, block.columns.len);
+
+    // Check celled columns
+    const celledCols = block.getCelledColumns();
+    try std.testing.expectEqual(2, celledCols.len);
+
+    // Both columns should have only 1 value stored
+    for (celledCols) |col| {
+        try std.testing.expectEqual(1, col.values.len);
+    }
+}
+
+test "put: fast path with same fields and mixed columns" {
+    const allocator = std.testing.allocator;
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+        .{ .key = "host", .value = "server1" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+        .{ .key = "host", .value = "server1" },
+    };
+    var fields3 = [_]Field{
+        .{ .key = "level", .value = "error" },
+        .{ .key = "app", .value = "seq" },
+        .{ .key = "host", .value = "server1" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 100,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 200,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 300,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields3[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    const timestamps = try allocator.alloc(u64, lines.len);
+    defer allocator.free(timestamps);
+
+    var block = Block{
+        .firstCelled = undefined,
+        .columns = undefined,
+        .timestamps = timestamps,
+    };
+
+    try block.put(allocator, &lines);
+    defer {
+        for (block.columns) |col| {
+            allocator.free(col.values);
+        }
+        allocator.free(block.columns);
+    }
+
+    // Check timestamps
+    try std.testing.expectEqual(100, block.timestamps[0]);
+    try std.testing.expectEqual(200, block.timestamps[1]);
+    try std.testing.expectEqual(300, block.timestamps[2]);
+
+    // Should have 1 regular column (level) and 2 celled columns (app, host)
+    try std.testing.expectEqual(1, block.firstCelled);
+    try std.testing.expectEqual(3, block.columns.len);
+
+    // Check regular column (level - varying values)
+    const regularCols = block.getColumns();
+    try std.testing.expectEqual(1, regularCols.len);
+    try std.testing.expectEqual(3, regularCols[0].values.len);
+    try std.testing.expectEqualStrings("level", regularCols[0].key);
+
+    // Check celled columns (app, host - constant values)
+    const celledCols = block.getCelledColumns();
+    try std.testing.expectEqual(2, celledCols.len);
+    for (celledCols) |col| {
+        try std.testing.expectEqual(1, col.values.len);
+    }
+}
+
+test "put: slow path with different fields" {
+    const allocator = std.testing.allocator;
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "cpu", .value = "0.8" },
+        .{ .key = "memory", .value = "512MB" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 100,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 200,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    const timestamps = try allocator.alloc(u64, lines.len);
+    defer allocator.free(timestamps);
+
+    var block = Block{
+        .firstCelled = undefined,
+        .columns = undefined,
+        .timestamps = timestamps,
+    };
+
+    try block.put(allocator, &lines);
+    defer {
+        for (block.columns) |col| {
+            allocator.free(col.values);
+        }
+        allocator.free(block.columns);
+    }
+
+    // Check timestamps
+    try std.testing.expectEqual(100, block.timestamps[0]);
+    try std.testing.expectEqual(200, block.timestamps[1]);
+
+    // Should have 4 columns total (level, app, cpu, memory)
+    try std.testing.expectEqual(4, block.columns.len);
+
+    // All columns should have 2 value slots (some may be empty strings)
+    for (block.columns) |col| {
+        try std.testing.expectEqual(2, col.values.len);
+    }
+}
+
+test "put: slow path with overlapping fields" {
+    const allocator = std.testing.allocator;
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+        .{ .key = "host", .value = "server1" },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "cpu", .value = "0.9" },
+    };
+    var fields3 = [_]Field{
+        .{ .key = "app", .value = "seq" },
+        .{ .key = "memory", .value = "1GB" },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 100,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 200,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 300,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields3[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    const timestamps = try allocator.alloc(u64, lines.len);
+    defer allocator.free(timestamps);
+
+    var block = Block{
+        .firstCelled = undefined,
+        .columns = undefined,
+        .timestamps = timestamps,
+    };
+
+    try block.put(allocator, &lines);
+    defer {
+        for (block.columns) |col| {
+            allocator.free(col.values);
+        }
+        allocator.free(block.columns);
+    }
+
+    // Check timestamps
+    try std.testing.expectEqual(100, block.timestamps[0]);
+    try std.testing.expectEqual(200, block.timestamps[1]);
+    try std.testing.expectEqual(300, block.timestamps[2]);
+
+    // Should have 5 unique columns (level, app, host, cpu, memory)
+    try std.testing.expectEqual(5, block.columns.len);
+
+    // All columns should have 3 value slots
+    for (block.columns) |col| {
+        try std.testing.expectEqual(3, col.values.len);
+    }
+
+    // Verify app column exists (appears in lines 0 and 2 with same value, empty in line 1)
+    var foundAppColumn = false;
+    for (block.columns) |col| {
+        if (std.mem.eql(u8, col.key, "app")) {
+            foundAppColumn = true;
+            try std.testing.expectEqualStrings("seq", col.values[0]);
+            try std.testing.expectEqualStrings("", col.values[1]); // Missing in line 1
+            try std.testing.expectEqualStrings("seq", col.values[2]);
+        }
+    }
+    try std.testing.expect(foundAppColumn);
+}
+
+test "put: fast path with large value prevents celling" {
+    const allocator = std.testing.allocator;
+
+    // Create a large value that exceeds maxCelledColumnValueSize (256)
+    var largeValue: [300]u8 = undefined;
+    @memset(&largeValue, 'x');
+
+    var fields1 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "message", .value = &largeValue },
+    };
+    var fields2 = [_]Field{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "message", .value = &largeValue },
+    };
+    var lines = [_]*const Line{
+        &.{
+            .timestampNs = 100,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields1[0..],
+            .encodedTags = undefined,
+        },
+        &.{
+            .timestampNs = 200,
+            .sid = .{ .id = 1, .tenantID = "1234" },
+            .fields = fields2[0..],
+            .encodedTags = undefined,
+        },
+    };
+
+    const timestamps = try allocator.alloc(u64, lines.len);
+    defer allocator.free(timestamps);
+
+    var block = Block{
+        .firstCelled = undefined,
+        .columns = undefined,
+        .timestamps = timestamps,
+    };
+
+    try block.put(allocator, &lines);
+    defer {
+        for (block.columns) |col| {
+            allocator.free(col.values);
+        }
+        allocator.free(block.columns);
+    }
+
+    // Should have 1 regular column (message - too large) and 1 celled column (level)
+    try std.testing.expectEqual(1, block.firstCelled);
+    try std.testing.expectEqual(2, block.columns.len);
+
+    // Check that message column is NOT celled (too large)
+    const regularCols = block.getColumns();
+    var foundMessage = false;
+    for (regularCols) |col| {
+        if (std.mem.eql(u8, col.key, "message")) {
+            foundMessage = true;
+            try std.testing.expectEqual(2, col.values.len);
+        }
+    }
+    try std.testing.expect(foundMessage);
+
+    // Check that level column IS celled
+    const celledCols = block.getCelledColumns();
+    var foundLevel = false;
+    for (celledCols) |col| {
+        if (std.mem.eql(u8, col.key, "level")) {
+            foundLevel = true;
+            try std.testing.expectEqual(1, col.values.len);
+        }
+    }
+    try std.testing.expect(foundLevel);
 }
