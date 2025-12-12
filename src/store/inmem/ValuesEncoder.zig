@@ -9,26 +9,143 @@ const Encoder = encoding.Encoder;
 const ColumnDict = @import("block_header.zig").ColumnDict;
 const ColumnType = @import("block_header.zig").ColumnType;
 
-const Zint = zint.Zint;
+const Z = zint.Zint(u8);
 
-fn encodeTimestampsWithZint(allocator: std.mem.Allocator, tss: []u64) ![]u8 {
-    if (tss.len > std.math.maxInt(u32)) {
-        return error.InputTooLarge;
+// fn encodeTimestampsWithZint(allocator: std.mem.Allocator, tss: []u64, ctx: zint.Ctx) ![]u8 {
+//     if (tss.len > std.math.maxInt(u32)) {
+//         return error.InputTooLarge;
+//     }
+//     const len: u32 = @intCast(tss.len);
+//
+//     const compress_buf = try allocator.alloc(u8, Z.deltapack_compress_bound(len));
+//     const compressed_size = try Z.deltapack_compress(ctx, tss, compress_buf);
+//
+//     return compress_buf[0..compressed_size];
+// }
+
+const encodeTimestampsWithDelta = @import("delta.zig").marshalInt64NearestDelta;
+
+fn makeTestInts(allocator: std.mem.Allocator, n: usize) ![]u64 {
+    const ints = try allocator.alloc(u64, n);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var current: u64 = @intCast(std.time.nanoTimestamp());
+    for (ints) |*value| {
+        value.* = current;
+        current += random.intRangeAtMost(u64, 0, 20);
     }
-    const len: u32 = @intCast(tss.len);
 
-    const ctx = zint.Ctx.init(allocator) catch unreachable;
+    return ints;
+}
+
+test "encodeZint" {
+    const allocator = std.heap.page_allocator;
+    const ctx = try zint.Ctx.init(allocator);
     defer ctx.deinit(allocator);
 
-    const Z = zint.Zint(u64);
-    const compress_buf = try allocator.alloc(u8, Z.deltapack_compress_bound(len));
-    const compressed_size = try Z.deltapack_compress(ctx, tss, compress_buf);
+    const data = try makeTestInts(allocator, 1000);
+    defer allocator.free(data);
 
-    return compress_buf[0..compressed_size];
+    // const buf = try encodeTimestampsWithZint(allocator, data, ctx);
+    //
+    // std.debug.print("\n", .{});
+    // std.debug.print("original: {d}\n", .{data.len * 8});
+    // std.debug.print("packed: {d}\n", .{buf.len});
+
+    // const now: u64 = @intCast(std.time.nanoTimestamp());
+    // for (0..100000) |_| {
+    //     var b: [8000 * 8]u8 = undefined;
+    //     var fba = std.heap.FixedBufferAllocator.init(&b);
+    //     _ = try encodeTimestampsWithZint(fba.allocator(), data, ctx);
+    // }
+    // const after: u64 = @intCast(std.time.nanoTimestamp());
+    // std.debug.print("duration: {d}\n", .{after - now}); // 6663096000
+}
+
+test "encodeDelta" {
+    const allocator = std.heap.page_allocator;
+
+    const data = try makeTestInts(allocator, 1000);
+    defer allocator.free(data);
+
+    // var b: [4000 * 8]u8 = undefined;
+    // var packer = @import("delta.zig").TestPacker{ .buf = &b };
+
+    // _ = encodeTimestampsWithDelta(&packer, data, 64);
+    // const bound = try encoding.compressBound(packer.offset);
+    // const out = try allocator.alloc(u8, bound);
+    // // const offset = try encoding.compressAuto(out, packer.buf[0..packer.offset]);
+
+    // std.debug.print("\n", .{});
+    // std.debug.print("original: {d}\n", .{data.len * 8});
+    // std.debug.print("packed: {d}\n", .{packer.buf[0..packer.offset].len});
+    // // std.debug.print("packed: {d}\n", .{out[0..offset].len});
+
+    const now: u64 = @intCast(std.time.nanoTimestamp());
+    for (0..100000) |_| {
+        var b: [4000 * 8]u8 = undefined;
+        var packer = @import("delta.zig").TestPacker{ .buf = &b };
+        _ = encodeTimestampsWithDelta(&packer, data, 64);
+
+        var static: [4000 * 8]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&static);
+
+        const bound = try encoding.compressBound(packer.offset);
+        const out = try fba.allocator().alloc(u8, bound);
+        const offset = try encoding.compressAuto(out, packer.buf[0..packer.offset]);
+        _ = offset;
+    }
+    const after: u64 = @intCast(std.time.nanoTimestamp());
+    std.debug.print("duration: {d}\n", .{after - now}); // 4027488000
+}
+
+test "encodeZintDelta" {
+    const allocator = std.heap.page_allocator;
+
+    const data = try makeTestInts(allocator, 4000);
+    defer allocator.free(data);
+
+    // var b: [4000 * 8]u8 = undefined;
+    // var packer = @import("delta.zig").TestPacker{ .buf = &b };
+    //
+    // _ = encodeTimestampsWithDelta(&packer, data, 64);
+    const ctx = try zint.Ctx.init(allocator);
+    defer ctx.deinit(allocator);
+    //
+    // const compress_buf = try allocator.alloc(u8, Z.bitpack_compress_bound(@intCast(packer.offset)));
+    // const compressed_size = try Z.bitpack_compress(ctx, packer.buf[0..packer.offset], compress_buf);
+    //
+    // std.debug.print("\n", .{});
+    // std.debug.print("original: {d}\n", .{data.len * 8});
+    // std.debug.print("pre packed: {d}\n", .{packer.buf[0..packer.offset].len});
+    // std.debug.print("packed: {d}\n", .{compress_buf[0..compressed_size].len});
+
+    const now: u64 = @intCast(std.time.nanoTimestamp());
+    for (0..100000) |_| {
+        var b: [4000 * 8]u8 = undefined;
+        var packer = @import("delta.zig").TestPacker{ .buf = &b };
+        _ = encodeTimestampsWithDelta(&packer, data, 64);
+
+        var static: [4000 * 8]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&static);
+
+        const compress_buf = try fba.allocator().alloc(u8, Z.bitpack_compress_bound(@intCast(packer.offset)));
+        _ = try Z.bitpack_compress(ctx, packer.buf[0..packer.offset], compress_buf);
+    }
+    const after: u64 = @intCast(std.time.nanoTimestamp());
+    std.debug.print("duration: {d}\n", .{after - now}); // 4027488000
 }
 
 pub fn encodeTimestamps(allocator: std.mem.Allocator, tss: []u64) ![]u8 {
-    return encodeTimestampsWithZint(allocator, tss);
+    // const ctx = try zint.Ctx.init(allocator);
+    // defer ctx.deinit(allocator);
+    _ = allocator;
+    _ = tss;
+
+    return error.NotImplemented;
+    // return encodeTimestampsWithZint(allocator, tss, ctx);
 }
 
 pub const EncodeValueType = struct {
