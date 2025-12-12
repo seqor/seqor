@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const Field = @import("../lines.zig").Field;
 const Line = @import("../lines.zig").Line;
 const Encoder = @import("encoding").Encoder;
 
@@ -12,12 +13,10 @@ fn columnLessThan(_: void, one: Column, another: Column) bool {
 }
 
 pub const Column = struct {
-    // makes no sense to keep large values in celled columns,
-    // it won't help to improve performance
-    pub const maxCelledColumnValueSize = 256;
-
     key: []const u8,
     values: [][]const u8,
+
+    pub const maxCelledColumnValueSize = 256;
 
     pub fn isCelled(self: *Column) bool {
         if (self.values.len == 0) {
@@ -263,7 +262,7 @@ pub const Block = struct {
 
         // If value is too large, then we consider it not celled.
         // Not sure if this would work though?
-        if (value.len > maxCelledColumnValueSize) {
+        if (value.len > Column.maxCelledColumnValueSize) {
             return false;
         }
 
