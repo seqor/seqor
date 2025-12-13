@@ -16,6 +16,8 @@ pub const Column = struct {
     key: []const u8,
     values: [][]const u8,
 
+    // makes no sense to keep large values in celled columns,
+    // it won't help to improve performance
     pub const maxCelledColumnValueSize = 256;
 
     pub fn isCelled(self: *Column) bool {
