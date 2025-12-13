@@ -99,7 +99,7 @@ pub const Block = struct {
         }
 
         // Fast path if all lines have the same fields
-        if (Block.areSameFields(lines)) {
+        if (areSameFields(lines)) {
             // Extract timestamps
             for (lines, 0..) |line, i| {
                 self.timestamps[i] = line.timestampNs;
@@ -127,7 +127,7 @@ pub const Block = struct {
 
             var celledCount: usize = 0;
             for (0..firstLine.fields.len) |fieldIdx| {
-                if (Block.canBeSavedAsCelled(lines, fieldIdx)) {
+                if (canBeSavedAsCelled(lines, fieldIdx)) {
                     celledMask[fieldIdx] = true;
                     celledCount += 1;
                 } else {
@@ -231,51 +231,51 @@ pub const Block = struct {
         std.mem.sortUnstable(Column, self.getColumns(), {}, columnLessThan);
         std.mem.sortUnstable(Column, self.getCelledColumns(), {}, columnLessThan);
     }
+};
 
-    fn areSameFields(lines: []*const Line) bool {
-        if (lines.len == 0) {
-            return true;
-        }
-
-        const firstLine = lines[0];
-        for (lines[1..]) |line| {
-            if (line.fields.len != firstLine.fields.len) {
-                return false;
-            }
-
-            for (firstLine.fields, 0..) |field, i| {
-                if (!std.mem.eql(u8, field.key, line.fields[i].key)) {
-                    return false;
-                }
-            }
-        }
-
+fn areSameFields(lines: []*const Line) bool {
+    if (lines.len == 0) {
         return true;
     }
 
-    fn canBeSavedAsCelled(lines: []*const Line, index: usize) bool {
-        // If len is zero, then there's nothing to do.
-        if (lines.len == 0) {
-            return true;
-        }
-
-        const value = lines[0].fields[index].value;
-
-        // If value is too large, then we consider it not celled.
-        // Not sure if this would work though?
-        if (value.len > Column.maxCelledColumnValueSize) {
+    const firstLine = lines[0];
+    for (lines[1..]) |line| {
+        if (line.fields.len != firstLine.fields.len) {
             return false;
         }
 
-        for (lines[1..]) |line| {
-            if (std.mem.eql(u8, line.fields[index].value, value) == false) {
+        for (firstLine.fields, 0..) |field, i| {
+            if (!std.mem.eql(u8, field.key, line.fields[i].key)) {
                 return false;
             }
         }
+    }
 
+    return true;
+}
+
+fn canBeSavedAsCelled(lines: []*const Line, index: usize) bool {
+    // If len is zero, then there's nothing to do.
+    if (lines.len == 0) {
         return true;
     }
-};
+
+    const value = lines[0].fields[index].value;
+
+    // If value is too large, then we consider it not celled.
+    // Not sure if this would work though?
+    if (value.len > Column.maxCelledColumnValueSize) {
+        return false;
+    }
+
+    for (lines[1..]) |line| {
+        if (std.mem.eql(u8, line.fields[index].value, value) == false) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 test "areSameFields: happy path" {
     var fields1 = [_]Field{
@@ -301,7 +301,7 @@ test "areSameFields: happy path" {
         },
     };
 
-    try std.testing.expectEqual(true, Block.areSameFields(&lines));
+    try std.testing.expectEqual(true, areSameFields(&lines));
 }
 
 test "areSameFields: unhappy path" {
@@ -328,7 +328,7 @@ test "areSameFields: unhappy path" {
         },
     };
 
-    try std.testing.expectEqual(false, Block.areSameFields(&lines));
+    try std.testing.expectEqual(false, areSameFields(&lines));
 }
 
 test "areSameValuesWithinColumn: happy path" {
@@ -355,7 +355,7 @@ test "areSameValuesWithinColumn: happy path" {
         },
     };
 
-    try std.testing.expectEqual(true, Block.canBeSavedAsCelled(&lines, 0));
+    try std.testing.expectEqual(true, canBeSavedAsCelled(&lines, 0));
 }
 
 test "areSameValuesWithinColumn: unhappy path" {
@@ -382,7 +382,7 @@ test "areSameValuesWithinColumn: unhappy path" {
         },
     };
 
-    try std.testing.expectEqual(false, Block.canBeSavedAsCelled(&lines, 0));
+    try std.testing.expectEqual(false, canBeSavedAsCelled(&lines, 0));
 }
 
 test "put: empty lines array" {
