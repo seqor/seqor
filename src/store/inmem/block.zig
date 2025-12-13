@@ -93,10 +93,7 @@ pub const Block = struct {
     }
 
     fn put(self: *Block, allocator: std.mem.Allocator, lines: []*const Line) !void {
-        // If len is zero, nothing to do.
-        if (lines.len == 0) {
-            return;
-        }
+        std.debug.assert(lines.len > 0);
 
         // Fast path if all lines have the same fields
         if (areSameFields(lines)) {
@@ -233,8 +230,9 @@ pub const Block = struct {
     }
 };
 
+// TODO: Investigate if we need to check for unique/duplicated fields keys as well.
 fn areSameFields(lines: []*const Line) bool {
-    if (lines.len == 0) {
+    if (lines.len < 2) {
         return true;
     }
 
@@ -356,6 +354,7 @@ test "areSameValuesWithinColumn: happy path" {
     };
 
     try std.testing.expectEqual(true, canBeSavedAsCelled(&lines, 0));
+    try std.testing.expectEqual(true, canBeSavedAsCelled(&lines, 1));
 }
 
 test "areSameValuesWithinColumn: unhappy path" {
@@ -383,21 +382,7 @@ test "areSameValuesWithinColumn: unhappy path" {
     };
 
     try std.testing.expectEqual(false, canBeSavedAsCelled(&lines, 0));
-}
-
-test "put: empty lines array" {
-    const allocator = std.testing.allocator;
-    const timestamps = try allocator.alloc(u64, 0);
-    defer allocator.free(timestamps);
-
-    var block = Block{
-        .firstCelled = undefined,
-        .columns = undefined,
-        .timestamps = timestamps,
-    };
-
-    // Should not error on empty lines
-    try block.put(allocator, &[_]*const Line{});
+    try std.testing.expectEqual(true, canBeSavedAsCelled(&lines, 1));
 }
 
 test "put: fast path with same fields and all celled columns" {
