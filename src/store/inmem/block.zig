@@ -110,7 +110,7 @@ pub const Block = struct {
             var columns = try allocator.alloc(Column, firstLine.fields.len);
             errdefer allocator.free(columns);
 
-            @memset(columns, .{ .key = "", .values = &[_][]u8{} });
+            @memset(columns, .{ .key = "", .values = undefined });
             errdefer {
                 for (columns) |col| {
                     if (col.values.len != 0) {
