@@ -119,12 +119,14 @@ pub const Block = struct {
                 }
             }
 
+            // TODO: Compare with bitset instead of bool array?
+            // TODO: Use fixed buffer allocator (1-2kb)
             // First pass: identify which columns are celled
             var celledMask = try allocator.alloc(bool, firstLine.fields.len);
             defer allocator.free(celledMask);
 
             var celledCount: usize = 0;
-            for (firstLine.fields, 0..) |_, fieldIdx| {
+            for (0..firstLine.fields.len) |fieldIdx| {
                 if (Block.canBeSavedAsCelled(lines, fieldIdx)) {
                     celledMask[fieldIdx] = true;
                     celledCount += 1;
@@ -179,11 +181,9 @@ pub const Block = struct {
             self.timestamps[i] = line.timestampNs;
         }
 
-        // Allocates column with number of unique fields
         var columns = try allocator.alloc(Column, columnI.count());
         errdefer allocator.free(columns);
 
-        // Assigns empty keys and values to columns
         @memset(columns, .{ .key = "", .values = &[_][]u8{} });
         errdefer {
             for (columns) |col| {
