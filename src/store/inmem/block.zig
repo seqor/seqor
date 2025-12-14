@@ -97,24 +97,15 @@ pub const Block = struct {
 
         // Fast path if all lines have the same fields
         if (areSameFields(lines)) {
-            // Extract timestamps
             for (lines, 0..) |line, i| {
                 self.timestamps[i] = line.timestampNs;
             }
 
-            // All lines have same fields, process each field column
             const firstLine = lines[0];
             var columns = try allocator.alloc(Column, firstLine.fields.len);
             errdefer allocator.free(columns);
 
             @memset(columns, .{ .key = "", .values = undefined });
-            errdefer {
-                for (columns) |col| {
-                    if (col.values.len != 0) {
-                        allocator.free(col.values);
-                    }
-                }
-            }
 
             // TODO: Compare with bitset instead of bool array?
             // TODO: Use fixed buffer allocator (1-2kb)
@@ -136,6 +127,13 @@ pub const Block = struct {
             var regularIdx: usize = 0;
             var celledIdx: usize = firstLine.fields.len - celledCount;
 
+            errdefer {
+                for (columns) |col| {
+                    if (col.values.len != 0) {
+                        allocator.free(col.values);
+                    }
+                }
+            }
             for (firstLine.fields, 0..) |field, fieldIdx| {
                 const isFieldCelled = celledMask[fieldIdx];
                 const targetIdx = if (isFieldCelled) celledIdx else regularIdx;
@@ -143,12 +141,10 @@ pub const Block = struct {
                 col.key = field.key;
 
                 if (isFieldCelled) {
-                    // Constant column - store single value
                     col.values = try allocator.alloc([]const u8, 1);
                     col.values[0] = field.value;
                     celledIdx += 1;
                 } else {
-                    // Variable column - store all values
                     col.values = try allocator.alloc([]const u8, lines.len);
                     for (lines, 0..) |line, lineIdx| {
                         col.values[lineIdx] = line.fields[fieldIdx].value;
