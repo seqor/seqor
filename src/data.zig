@@ -111,6 +111,6 @@ test "dataWorker" {
 
     const alloc = std.testing.allocator;
     var d = try Data.init(alloc);
-    std.Thread.sleep(2 * 1_000_000_000);
+    std.Thread.sleep(2 * std.time.ns_per_s);
     d.deinit(alloc);
 }
