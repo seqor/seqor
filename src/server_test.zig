@@ -9,7 +9,7 @@ test "serverWithSIGTERM" {
     // Start the server in a separate thread
     const ServerThread = struct {
         fn run() void {
-            server.startServer(allocator, Conf.default()) catch |err| {
+            server.startServer(allocator, allocator, Conf.default()) catch |err| {
                 std.debug.print("Server error: {}\n", .{err});
             };
         }
