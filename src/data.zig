@@ -7,6 +7,12 @@ const TableMem = @import("store/inmem/TableMem.zig");
 
 const maxLevelSize = 100 * 1024 * 1024 * 1024;
 
+const PartType = enum(u8) {
+    inmemory = 0,
+    small = 1,
+    big = 2,
+};
+
 inline fn setFlushTime() i64 {
     // now + 1s
     return std.time.microTimestamp() + std.time.us_per_s;
@@ -52,6 +58,7 @@ pub const DataShard = struct {
 pub const Data = struct {
     shards: []DataShard,
     nextShard: std.atomic.Value(usize),
+    mergeIdx: std.atomic.Value(usize),
 
     mx: std.Thread.Mutex,
     memTables: std.ArrayList(*TableMem),
@@ -61,7 +68,9 @@ pub const Data = struct {
     memTableSem: std.Thread.Semaphore,
     stopped: std.atomic.Value(bool),
 
-    pub fn init(allocator: std.mem.Allocator, workersAllocator: std.mem.Allocator) !*Data {
+    path: []const u8,
+
+    pub fn init(allocator: std.mem.Allocator, workersAllocator: std.mem.Allocator, path: []u8) !*Data {
         const conf = Conf.getConf().server.pools;
         std.debug.assert(conf.cpus != 0);
         // 4 is a minimum amount for workers:
@@ -89,6 +98,7 @@ pub const Data = struct {
         self.* = Data{
             .shards = shards,
             .nextShard = std.atomic.Value(usize).init(0),
+            .nextMergeIdx = std.atomic.Value(usize).init(0),
 
             .mx = .{},
             .memTables = std.ArrayList(*TableMem).empty,
@@ -97,6 +107,7 @@ pub const Data = struct {
             .wg = wg,
             .memTableSem = .{ .permits = conf.cpus },
             .stopped = std.atomic.Value(bool).init(false),
+            .path = path,
         };
 
         // the allocator is different from http life cycle,
@@ -245,11 +256,77 @@ pub const Data = struct {
         }
     }
 
-    fn mergeTables(self: *Data, alloc: std.mem.Allocator, tables: []*TableMem, force: bool) void {
+    fn getDstPartType(self: *Data, allocator: std.mem.Allocator) PartType {
         _ = self;
-        _ = alloc;
-        _ = tables;
-        _ = force;
+        _ = allocator;
+
+        return PartType.inmemory;
+    }
+
+    fn getDstPartPath(self: *Data, allocator: std.mem.Allocator, dstPartType: PartType, mergeIdx: usize) []const u8 {
+        var dstPartPath = "";
+        if (dstPartType != .inmemory) {
+            dstPartPath = try std.fmt.allocPrint(
+                allocator,
+                "{s}/{X:0>16}",
+                .{ self.path, mergeIdx },
+            );
+        }
+        return dstPartPath;
+    }
+
+    fn nextMergeIdx(self: *Data) usize {
+        return self.mergeIdx.fetchAdd(1, .acq_rel);
+    }
+
+    fn timer() std.time.Timer {
+        return std.time.Timer.start() catch unreachable;
+    }
+
+    fn openBlockStreamReaders() []*BlockStreamReader {
+        var readers = try allocator.alloc(*BlockStreamReader, count);
+    }
+
+    fn mergeTables(self: *Data, alloc: std.mem.Allocator, tables: []*TableMem, force: bool) void {
+        if (tables.len == 0) {
+            return;
+        }
+
+        for (tables) |table| {
+            std.debug.assert(table.isInMerge);
+        }
+
+        defer {
+            self.mx.lock();
+            for (tables) |table| {
+                std.debug.assert(table.isInMerge);
+                table.isInMerge = false;
+            }
+            self.mx.unlock();
+        }
+
+        var t = timer();
+        const dstPartType = self.getDstPartType(alloc);
+        if (dstPartType != .inmemory) {
+            // TODO: do some disk reservations when disk type
+        }
+
+        switch (dstPartType) {
+            // TODO: track progress
+            .inmemory => {},
+            .small => {},
+            .big => {},
+        }
+        const mergeIdx = self.nextMergeIdx();
+        const dstPathPart = self.getDstPartPath(alloc, dstPartType, mergeIdx);
+        defer alloc.free(dstPathPart);
+
+        // pws[0].mp != nil if we have wrappers
+        if (force and tables.len == 1) {
+            tables[0].flushToDisk(alloc, dstPathPart);
+        }
+
+        _ = t.lap();
     }
 
     // FIXME: allocator must be the same as in the background workers to have same source of ownership for mem tables
