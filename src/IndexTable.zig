@@ -12,6 +12,23 @@ const maxBlocksPerShard = 256;
 // TODO: worth tuning on practice
 const blocksInMemTable = 15;
 
+const MarshalType = enum(u8) {
+    marshalTypePlain = 0,
+    marshalTypeZSTDCompressed = 1,
+};
+
+const EncodedMemBlock = struct {
+    firstItem: []u8,
+    prefix: []u8,
+    itemsCount: u32,
+    marshalType: MarshalType,
+};
+
+const StorageBlock = struct {
+    itemsData: std.ArrayList(u8) = .empty,
+    lensData: std.ArrayList(u8) = .empty,
+};
+
 const MemBlock = struct {
     data: std.ArrayList([]const u8),
     size: u32,
@@ -30,7 +47,7 @@ const MemBlock = struct {
         return true;
     }
 
-    pub fn setupBlock(self: *MemBlock) void {
+    pub fn sortData(self: *MemBlock) void {
         // TODO: evaluate the chances of the data being sorted, might improve performance a lot
 
         self.setPrefixes();
@@ -69,6 +86,17 @@ const MemBlock = struct {
         const anotherSuffix = another[prefixLen..];
 
         return std.mem.lessThan(u8, oneSuffix, anotherSuffix);
+    }
+
+    fn encode(
+        self: *MemBlock,
+        alloc: Allocator,
+        sb: *StorageBlock,
+    ) !EncodedMemBlock {
+        _ = self;
+        _ = alloc;
+        _ = sb;
+        unreachable;
     }
 };
 
@@ -212,7 +240,60 @@ fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void 
     unreachable;
 }
 
+fn compressZSTDLevel(alloc: Allocator, data: []const u8) ![]u8 {
+    _ = alloc;
+    _ = data;
+    unreachable;
+}
+
+const BlockHeader = struct {
+    firstItem: []u8,
+    prefix: []u8,
+    itemsCount: u32 = 0,
+    marshalType: MarshalType,
+    itemsBlockOffset: u64 = 0,
+    itemsBlockSize: u32 = 0,
+    lensBlockOffset: u64 = 0,
+    lensBlockSize: u32 = 0,
+
+    fn encode(self: *const BlockHeader, dst: []u8) []u8 {
+        _ = self;
+        _ = dst;
+        unreachable;
+    }
+};
+
+const TableHeader = struct {
+    itemsCount: u64,
+    blocksCount: u64,
+    firstItem: []const u8,
+    lastItem: []const u8,
+};
+
+const MetaIndex = struct {
+    firstItem: []u8 = undefined,
+    blockHeadersCount: u32 = 0,
+    indexBlockOffset: u64 = 0,
+    indexBlockSize: u32 = 0,
+
+    fn encode(self: *const MetaIndex, dst: []u8) []u8 {
+        _ = self;
+        _ = dst;
+        unreachable;
+    }
+};
+
 const MemTable = struct {
+    blockHeader: BlockHeader,
+    tableHeader: TableHeader,
+    metaIndex: MetaIndex,
+    dataBuf: std.ArrayList(u8) = .empty,
+    lensBuf: std.ArrayList(u8) = .empty,
+    indexBuf: std.ArrayList(u8) = .empty,
+    metaindexBuf: std.ArrayList(u8) = .empty,
+
+    flushAtUs: ?i64 = null,
+
     pub fn init(alloc: Allocator, blocks: []*MemBlock) !*MemTable {
         var readers = try std.ArrayList(*BlockReader).initCapacity(alloc, blocks.len);
         errdefer {
@@ -225,7 +306,7 @@ const MemTable = struct {
         if (blocks.len == 1) {
             // nothing to merge
             const b = blocks[0];
-            b.setupBlock();
+            b.sortData();
 
             const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
             try t.setup(alloc, b, flushAtUs);
@@ -237,20 +318,64 @@ const MemTable = struct {
             readers.appendAssumeCapacity(reader);
         }
 
-        t.mergeIntoMemTable(readers);
-
-        return t;
+        unreachable;
+        // t.mergeIntoMemTable(readers);
+        // return t;
     }
 
     pub fn deinit(self: *MemTable, alloc: Allocator) void {
+        self.dataBuf.deinit(alloc);
+        self.lensBuf.deinit(alloc);
+        self.indexBuf.deinit(alloc);
+        self.metaindexBuf.deinit(alloc);
         alloc.destroy(self);
     }
 
     fn setup(self: *MemTable, alloc: Allocator, block: *MemBlock, flushAtUs: i64) !void {
-        _ = self;
-        _ = alloc;
-        _ = block;
-        _ = flushAtUs;
+        self.flushAtUs = flushAtUs;
+
+        var sb = StorageBlock{};
+        const encodedBlock = try block.encode(alloc, &sb);
+        self.blockHeader.firstItem = encodedBlock.firstItem;
+        self.blockHeader.prefix = encodedBlock.prefix;
+        self.blockHeader.itemsCount = encodedBlock.itemsCount;
+        self.blockHeader.marshalType = encodedBlock.marshalType;
+
+        self.tableHeader = .{
+            .itemsCount = @intCast(block.data.items.len),
+            .blocksCount = 1,
+            .firstItem = block.data.items[0],
+            .lastItem = block.data.items[block.data.items.len - 1],
+        };
+
+        try self.dataBuf.appendSlice(alloc, sb.itemsData.items);
+        self.blockHeader.itemsBlockOffset = 0;
+        self.blockHeader.itemsBlockSize = @intCast(sb.itemsData.items.len);
+
+        try self.lensBuf.appendSlice(alloc, sb.lensData.items);
+        self.blockHeader.lensBlockOffset = 0;
+        self.blockHeader.lensBlockSize = @intCast(sb.lensData.items.len);
+
+        var bb = std.ArrayList(u8).empty;
+        defer bb.deinit(alloc);
+
+        const compressed = try compressZSTDLevel(alloc, bb.items);
+        defer alloc.free(compressed);
+
+        try self.indexBuf.appendSlice(alloc, compressed);
+
+        self.metaIndex.firstItem = self.blockHeader.firstItem;
+        self.metaIndex.blockHeadersCount = 1;
+        self.metaIndex.indexBlockOffset = 0;
+        self.metaIndex.indexBlockSize = @intCast(compressed.len);
+
+        bb.clearRetainingCapacity();
+        const marshaledMr = self.metaIndex.encode(bb.items);
+
+        const compressedMr = try compressZSTDLevel(alloc, marshaledMr);
+        defer alloc.free(compressedMr);
+
+        try self.metaindexBuf.appendSlice(alloc, compressedMr);
     }
 
     fn mergeIntoMemTable(self: *MemTable, readers: std.ArrayList(*BlockReader)) void {
@@ -263,7 +388,7 @@ const BlockReader = struct {
     block: *MemBlock,
 
     pub fn init(alloc: Allocator, block: *MemBlock) !*BlockReader {
-        block.setupBlock();
+        block.sortData();
 
         const r = try alloc.create(BlockReader);
         r.* = .{
