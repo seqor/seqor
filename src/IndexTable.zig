@@ -17,6 +17,11 @@ const MemBlock = struct {
     size: u32,
     prefix: []const u8,
 
+    pub fn deinit(self: *MemBlock, alloc: Allocator) void {
+        self.data.deinit(alloc);
+        alloc.destroy(self);
+    }
+
     pub fn add(self: *MemBlock, alloc: Allocator, entry: []const u8) !bool {
         if ((self.size + entry.len) > maxMemBlockSize) return false;
 
@@ -25,8 +30,14 @@ const MemBlock = struct {
         return true;
     }
 
-    pub fn setPrefixes(self: *MemBlock) void {
+    pub fn setupBlock(self: *MemBlock) void {
         // TODO: evaluate the chances of the data being sorted, might improve performance a lot
+
+        self.setPrefixes();
+        self.sort();
+    }
+
+    pub fn setPrefixes(self: *MemBlock) void {
         if (self.data.items.len == 0) return;
 
         if (self.data.items.len == 1) {
@@ -45,8 +56,8 @@ const MemBlock = struct {
         }
 
         self.prefix = prefix;
-        self.sort();
     }
+
     pub fn sort(self: *MemBlock) void {
         std.mem.sortUnstable([]const u8, self.data.items, self, memBlockEntryLessThan);
     }
@@ -198,6 +209,7 @@ fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void 
 
     _ = self;
     _ = force;
+    unreachable;
 }
 
 const MemTable = struct {
@@ -207,21 +219,25 @@ const MemTable = struct {
             for (readers.items) |reader| reader.deinit(alloc);
             readers.deinit(alloc);
         }
+        const t = try alloc.create(MemTable);
+        errdefer alloc.destroy(t);
+
+        if (blocks.len == 1) {
+            // nothing to merge
+            const b = blocks[0];
+            b.setupBlock();
+
+            const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
+            try t.setup(alloc, b, flushAtUs);
+            return t;
+        }
 
         for (0..blocks.len) |i| {
             const reader = try BlockReader.init(alloc, blocks[i]);
             readers.appendAssumeCapacity(reader);
         }
 
-        // const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
-        const t = try alloc.create(MemTable);
-        t.* = .{};
-        if (readers.items.len > 1) {
-            t.fromReaders(readers);
-            return t;
-        }
-
-        // unreachable;
+        t.mergeIntoMemTable(readers);
 
         return t;
     }
@@ -230,7 +246,14 @@ const MemTable = struct {
         alloc.destroy(self);
     }
 
-    fn fromReaders(self: *MemTable, readers: std.ArrayList(*BlockReader)) void {
+    fn setup(self: *MemTable, alloc: Allocator, block: *MemBlock, flushAtUs: i64) !void {
+        _ = self;
+        _ = alloc;
+        _ = block;
+        _ = flushAtUs;
+    }
+
+    fn mergeIntoMemTable(self: *MemTable, readers: std.ArrayList(*BlockReader)) void {
         _ = self;
         _ = readers;
     }
@@ -240,7 +263,7 @@ const BlockReader = struct {
     block: *MemBlock,
 
     pub fn init(alloc: Allocator, block: *MemBlock) !*BlockReader {
-        block.setPrefixes();
+        block.setupBlock();
 
         const r = try alloc.create(BlockReader);
         r.* = .{
@@ -250,6 +273,7 @@ const BlockReader = struct {
     }
 
     pub fn deinit(self: *BlockReader, alloc: Allocator) void {
+        self.block.deinit(alloc);
         alloc.destroy(self);
     }
 };
