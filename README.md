@@ -37,3 +37,10 @@ app:
 1. https://zigistry.dev/
 2. https://ziglist.org/
 
+
+Nice to have:
+- Design landing page
+- Drop a couple blog posts in there on:
+    1. why static allocation is not the best 
+    2. write logs effectively
+
