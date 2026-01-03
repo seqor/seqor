@@ -107,7 +107,7 @@ const MemBlock = struct {
 
         // TODO: consider making len limit 128
         if (self.size - self.prefix.len * self.data.items.len < 64 or self.data.items.len < 2) {
-            try self.encodePlain(sb);
+            try self.encodePlain(alloc, sb);
             return EncodedMemBlock{
                 .firstItem = firstItem,
                 .prefix = self.prefix,
@@ -184,7 +184,7 @@ const MemBlock = struct {
             0.9 * @as(f64, @floatFromInt(self.size - self.prefix.len * self.data.items.len)))
         {
             sb.reset();
-            try self.encodePlain(sb);
+            try self.encodePlain(alloc, sb);
             return EncodedMemBlock{
                 .firstItem = firstItem,
                 .prefix = self.prefix,
@@ -201,10 +201,26 @@ const MemBlock = struct {
         };
     }
 
-    fn encodePlain(self: *MemBlock, sb: *StorageBlock) !void {
-        _ = self;
-        _ = sb;
-        unreachable;
+    fn encodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock) !void {
+        try sb.itemsData.ensureUnusedCapacity(
+            alloc,
+            self.size - (self.prefix.len * self.data.items.len) - self.data.items[0].len,
+        );
+        try sb.lensData.ensureUnusedCapacity(alloc, 2 * (self.data.items.len - 1));
+
+        for (self.data.items[1..]) |item| {
+            const suffix = item[self.prefix.len..];
+            sb.itemsData.appendSliceAssumeCapacity(suffix);
+        }
+
+        // no chance any len value is larger than 16384 (0x4000)
+        const slice = sb.lensData.unusedCapacitySlice();
+        var enc = Encoder.init(slice);
+        for (self.data.items[1..]) |item| {
+            const len: u64 = @intCast(item.len - self.prefix.len);
+            enc.writeVarInt(len);
+        }
+        sb.lensData.items.len = enc.offset;
     }
 };
 
@@ -355,9 +371,9 @@ const BlockHeader = struct {
     lensBlockOffset: u64 = 0,
     lensBlockSize: u32 = 0,
 
-    fn encode(self: *const BlockHeader, dst: []u8) []u8 {
+    fn encode(self: *const BlockHeader, alloc: Allocator) []u8 {
         _ = self;
-        _ = dst;
+        _ = alloc;
         unreachable;
     }
 };
@@ -375,9 +391,9 @@ const MetaIndex = struct {
     indexBlockOffset: u64 = 0,
     indexBlockSize: u32 = 0,
 
-    fn encode(self: *const MetaIndex, dst: []u8) []u8 {
+    fn encode(self: *const MetaIndex, alloc: Allocator) []u8 {
         _ = self;
-        _ = dst;
+        _ = alloc;
         unreachable;
     }
 };
@@ -455,13 +471,11 @@ const MemTable = struct {
         self.blockHeader.lensBlockOffset = 0;
         self.blockHeader.lensBlockSize = @intCast(sb.lensData.items.len);
 
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(alloc);
+        const encodedBlockHeader = self.blockHeader.encode(alloc);
 
-        var bound = try encoding.compressBound(buf.items.len);
+        var bound = try encoding.compressBound(encodedBlockHeader.len);
         const compressed = try alloc.alloc(u8, bound);
-        var n = try encoding.compressAuto(compressed, buf.items);
-
+        var n = try encoding.compressAuto(compressed, encodedBlockHeader);
         try self.indexBuf.appendSlice(alloc, compressed[0..n]);
 
         self.metaIndex.firstItem = self.blockHeader.firstItem;
@@ -469,8 +483,7 @@ const MemTable = struct {
         self.metaIndex.indexBlockOffset = 0;
         self.metaIndex.indexBlockSize = @intCast(n);
 
-        buf.clearRetainingCapacity();
-        const encodedMetaIndex = self.metaIndex.encode(buf.items);
+        const encodedMetaIndex = self.metaIndex.encode(alloc);
 
         bound = try encoding.compressBound(encodedMetaIndex.len);
         const compressedMr = try alloc.alloc(u8, bound);
