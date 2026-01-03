@@ -364,17 +364,31 @@ fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void 
 const BlockHeader = struct {
     firstItem: []const u8,
     prefix: []const u8,
-    itemsCount: u32 = 0,
     encodingType: EncodingTye,
+    itemsCount: u32 = 0,
     itemsBlockOffset: u64 = 0,
-    itemsBlockSize: u32 = 0,
     lensBlockOffset: u64 = 0,
+    itemsBlockSize: u32 = 0,
     lensBlockSize: u32 = 0,
 
-    fn encode(self: *const BlockHeader, alloc: Allocator) []u8 {
-        _ = self;
-        _ = alloc;
-        unreachable;
+    // [len:n][firstItem:len][len:n][prefix:len][count:4][type:1][offset:8][size:4][offset:8][size:4] = bound + len + 29
+    fn encode(self: *const BlockHeader, alloc: Allocator) ![]u8 {
+        const firstItemLenBound = Encoder.varIntBound(self.firstItem.len);
+        const prefixLenBound = Encoder.varIntBound(self.prefix.len);
+        const size = firstItemLenBound + prefixLenBound + self.firstItem.len + self.prefix.len + 29;
+        const buf = try alloc.alloc(u8, size);
+        var enc = Encoder.init(buf);
+
+        enc.writeString(self.firstItem);
+        enc.writeString(self.prefix);
+        enc.writeInt(u8, @intFromEnum(self.encodingType));
+        enc.writeInt(u32, self.itemsCount);
+        enc.writeInt(u64, self.itemsBlockOffset);
+        enc.writeInt(u64, self.lensBlockOffset);
+        enc.writeInt(u32, self.itemsBlockSize);
+        enc.writeInt(u32, self.lensBlockSize);
+
+        return buf;
     }
 };
 
@@ -391,10 +405,18 @@ const MetaIndex = struct {
     indexBlockOffset: u64 = 0,
     indexBlockSize: u32 = 0,
 
-    fn encode(self: *const MetaIndex, alloc: Allocator) []u8 {
-        _ = self;
-        _ = alloc;
-        unreachable;
+    // [firstItem.len:firstItem][4:count][8:offset][4:size] = firstItem.len + lenBound + 16
+    fn encode(self: *const MetaIndex, alloc: Allocator) ![]u8 {
+        const firstItemBound = Encoder.varIntBound(self.firstItem.len);
+        const buf = try alloc.alloc(u8, firstItemBound + self.firstItem.len + 16);
+        var enc = Encoder.init(buf);
+
+        enc.writeString(self.firstItem);
+        enc.writeInt(u32, self.blockHeadersCount);
+        enc.writeInt(u64, self.indexBlockOffset);
+        enc.writeInt(u32, self.indexBlockSize);
+
+        return buf;
     }
 };
 
@@ -471,7 +493,8 @@ const MemTable = struct {
         self.blockHeader.lensBlockOffset = 0;
         self.blockHeader.lensBlockSize = @intCast(sb.lensData.items.len);
 
-        const encodedBlockHeader = self.blockHeader.encode(alloc);
+        const encodedBlockHeader = try self.blockHeader.encode(alloc);
+        defer alloc.free(encodedBlockHeader);
 
         var bound = try encoding.compressBound(encodedBlockHeader.len);
         const compressed = try alloc.alloc(u8, bound);
@@ -483,7 +506,8 @@ const MemTable = struct {
         self.metaIndex.indexBlockOffset = 0;
         self.metaIndex.indexBlockSize = @intCast(n);
 
-        const encodedMetaIndex = self.metaIndex.encode(alloc);
+        const encodedMetaIndex = try self.metaIndex.encode(alloc);
+        defer alloc.free(encodedMetaIndex);
 
         bound = try encoding.compressBound(encodedMetaIndex.len);
         const compressedMr = try alloc.alloc(u8, bound);
