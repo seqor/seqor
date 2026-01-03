@@ -433,7 +433,7 @@ const MemTable = struct {
 
     pub fn init(alloc: Allocator, blocks: []*MemBlock) !*MemTable {
         var readers = try std.ArrayList(*BlockReader).initCapacity(alloc, blocks.len);
-        errdefer {
+        defer {
             for (readers.items) |reader| reader.deinit(alloc);
             readers.deinit(alloc);
         }
@@ -451,13 +451,13 @@ const MemTable = struct {
         }
 
         for (0..blocks.len) |i| {
-            const reader = try BlockReader.init(alloc, blocks[i]);
+            const reader = try BlockReader.initFromMemBlock(alloc, blocks[i]);
             readers.appendAssumeCapacity(reader);
         }
 
-        unreachable;
-        // t.mergeIntoMemTable(readers);
-        // return t;
+        const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
+        try t.mergeIntoMemTable(alloc, readers, flushAtUs);
+        return t;
     }
 
     pub fn deinit(self: *MemTable, alloc: Allocator) void {
@@ -517,21 +517,51 @@ const MemTable = struct {
         try self.metaindexBuf.appendSlice(alloc, compressedMr[0..n]);
     }
 
-    fn mergeIntoMemTable(self: *MemTable, readers: std.ArrayList(*BlockReader)) void {
+    fn mergeIntoMemTable(
+        self: *MemTable,
+        alloc: Allocator,
+        readers: std.ArrayList(*BlockReader),
+        flushAtUs: i64,
+    ) !void {
+        self.flushAtUs = flushAtUs;
+
+        var outItemsCount: u64 = 0;
+        for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
+
+        const blockWriter = BlockWriter.initFromMemTable(self);
+        self.tableHeader = try self.mergeMemTables(alloc, blockWriter, readers);
+    }
+
+    fn mergeMemTables(
+        self: *MemTable,
+        alloc: Allocator,
+        writer: BlockWriter,
+        readers: std.ArrayList(*BlockReader),
+    ) !TableHeader {
         _ = self;
+        _ = alloc;
+        _ = writer;
         _ = readers;
+        unreachable;
     }
 };
 
 const BlockReader = struct {
     block: *MemBlock,
+    tableHeader: TableHeader,
 
-    pub fn init(alloc: Allocator, block: *MemBlock) !*BlockReader {
+    pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
         block.sortData();
 
         const r = try alloc.create(BlockReader);
         r.* = .{
             .block = block,
+            .tableHeader = .{
+                .blocksCount = 0,
+                .firstItem = undefined,
+                .itemsCount = 0,
+                .lastItem = undefined,
+            },
         };
         return r;
     }
@@ -539,5 +569,21 @@ const BlockReader = struct {
     pub fn deinit(self: *BlockReader, alloc: Allocator) void {
         self.block.deinit(alloc);
         alloc.destroy(self);
+    }
+};
+
+const BlockWriter = struct {
+    dataBuf: *std.ArrayList(u8),
+    lensBuf: *std.ArrayList(u8),
+    indexBuf: *std.ArrayList(u8),
+    metaindexBuf: *std.ArrayList(u8),
+
+    fn initFromMemTable(memTable: *MemTable) BlockWriter {
+        return .{
+            .dataBuf = &memTable.dataBuf,
+            .lensBuf = &memTable.lensBuf,
+            .indexBuf = &memTable.indexBuf,
+            .metaindexBuf = &memTable.metaindexBuf,
+        };
     }
 };
