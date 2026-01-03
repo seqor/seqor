@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
 
+const fs = @import("fs.zig");
 const getConf = @import("conf.zig").getConf;
 
 // TODO: make it configurable,
@@ -14,6 +15,8 @@ const maxBlocksPerShard = 256;
 
 // TODO: worth tuning on practice
 const blocksInMemTable = 15;
+
+const filenameMeta = "metadata.json";
 
 const EncodingTye = enum(u8) {
     plain = 0,
@@ -397,6 +400,21 @@ const TableHeader = struct {
     blocksCount: u64,
     firstItem: []const u8,
     lastItem: []const u8,
+
+    pub fn writeMeta(self: *const TableHeader, alloc: Allocator, tablePath: []const u8) !void {
+        const json = try std.json.Stringify.valueAlloc(alloc, .{
+            .itemsCount = self.itemsCount,
+            .blocksCount = self.blocksCount,
+            .firstItem = self.firstItem,
+            .lastItem = self.lastItem,
+        }, .{ .whitespace = .minified });
+        defer alloc.free(json);
+
+        const metadataPath = try std.fs.path.join(alloc, &[_][]const u8{ tablePath, filenameMeta });
+        defer alloc.free(metadataPath);
+
+        try fs.writeBufferValToFile(metadataPath, json);
+    }
 };
 
 const MetaIndex = struct {
@@ -529,19 +547,38 @@ const MemTable = struct {
         for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
 
         const blockWriter = BlockWriter.initFromMemTable(self);
-        self.tableHeader = try self.mergeMemTables(alloc, blockWriter, readers);
+        self.tableHeader = try self.mergeTables(alloc, "", blockWriter, readers);
     }
 
-    fn mergeMemTables(
+    // FIXME: make it just merge blocks
+    fn mergeTables(
+        self: *MemTable,
+        alloc: Allocator,
+        tablePath: []const u8,
+        writer: BlockWriter,
+        readers: std.ArrayList(*BlockReader),
+    ) !TableHeader {
+        const tableHeader = try self.mergeBlockStreams(alloc, writer, readers, null);
+        if (tablePath.len != 0) {
+            var fbaFallback = std.heap.stackFallback(512, alloc);
+            const fba = fbaFallback.get();
+            try tableHeader.writeMeta(fba, tablePath);
+        }
+        return tableHeader;
+    }
+
+    fn mergeBlockStreams(
         self: *MemTable,
         alloc: Allocator,
         writer: BlockWriter,
         readers: std.ArrayList(*BlockReader),
+        stopped: ?std.atomic.Value(bool),
     ) !TableHeader {
         _ = self;
         _ = alloc;
         _ = writer;
         _ = readers;
+        _ = stopped;
         unreachable;
     }
 };
