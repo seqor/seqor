@@ -1,6 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const encoding = @import("encoding");
+const Encoder = encoding.Encoder;
+
 const getConf = @import("conf.zig").getConf;
 
 // TODO: make it configurable,
@@ -12,21 +15,26 @@ const maxBlocksPerShard = 256;
 // TODO: worth tuning on practice
 const blocksInMemTable = 15;
 
-const MarshalType = enum(u8) {
-    marshalTypePlain = 0,
-    marshalTypeZSTDCompressed = 1,
+const EncodingTye = enum(u8) {
+    plain = 0,
+    zstd = 1,
 };
 
 const EncodedMemBlock = struct {
-    firstItem: []u8,
-    prefix: []u8,
+    firstItem: []const u8,
+    prefix: []const u8,
     itemsCount: u32,
-    marshalType: MarshalType,
+    encodingType: EncodingTye,
 };
 
 const StorageBlock = struct {
     itemsData: std.ArrayList(u8) = .empty,
     lensData: std.ArrayList(u8) = .empty,
+
+    pub fn reset(self: *StorageBlock) void {
+        self.itemsData.clearRetainingCapacity();
+        self.lensData.clearRetainingCapacity();
+    }
 };
 
 const MemBlock = struct {
@@ -93,21 +101,118 @@ const MemBlock = struct {
         alloc: Allocator,
         sb: *StorageBlock,
     ) !EncodedMemBlock {
+        std.debug.assert(self.data.items.len != 0);
+
+        const firstItem = self.data.items[0];
+
+        // TODO: consider making len limit 128
+        if (self.size - self.prefix.len * self.data.items.len < 64 or self.data.items.len < 2) {
+            try self.encodePlain(sb);
+            return EncodedMemBlock{
+                .firstItem = firstItem,
+                .prefix = self.prefix,
+                .itemsCount = @intCast(self.data.items.len),
+                .encodingType = .plain,
+            };
+        }
+
+        var itemsBuf = std.ArrayList(u8).empty;
+        defer itemsBuf.deinit(alloc);
+
+        var lens = try std.ArrayList(u32).initCapacity(alloc, self.data.items.len - 1);
+        defer lens.deinit(alloc);
+
+        var prevItem = firstItem[self.prefix.len..];
+        var prevLen: u32 = 0;
+
+        // write prefix lens
+        for (self.data.items[1..]) |item| {
+            const currItem = item[self.prefix.len..];
+            const prefix = findPrefix(prevItem, currItem);
+            try itemsBuf.appendSlice(alloc, currItem[prefix.len..]);
+
+            const xLen = prefix.len ^ prevLen;
+            lens.appendAssumeCapacity(@intCast(xLen));
+
+            prevItem = currItem;
+            prevLen = @intCast(prefix.len);
+        }
+
+        var fallbackFba = std.heap.stackFallback(2048, alloc);
+        var fba = fallbackFba.get();
+        const encodedPrefixLensBufSize = Encoder.varIntsBound(u32, lens.items);
+        const encodedPrefixLensBuf = try fba.alloc(u8, encodedPrefixLensBufSize);
+        defer fba.free(encodedPrefixLensBuf);
+        var enc = Encoder.init(encodedPrefixLensBuf);
+        enc.writeVarInts(u32, lens.items);
+
+        sb.itemsData = try std.ArrayList(u8).initCapacity(alloc, itemsBuf.items.len);
+        var bound = try encoding.compressBound(itemsBuf.items.len);
+        const compressedItems = try alloc.alloc(u8, bound);
+        defer alloc.free(compressedItems);
+        var n = try encoding.compressAuto(compressedItems, itemsBuf.items);
+        try sb.itemsData.appendSlice(alloc, compressedItems[0..n]);
+
+        // write items lens
+        lens.clearRetainingCapacity();
+
+        prevLen = @intCast(firstItem.len - self.prefix.len);
+        for (self.data.items[1..]) |item| {
+            const itemLen: u32 = @intCast(item.len - self.prefix.len);
+            const xLen = itemLen ^ prevLen;
+            prevLen = itemLen;
+            lens.appendAssumeCapacity(xLen);
+        }
+
+        const encodedLensBound = Encoder.varIntsBound(u32, lens.items);
+        const encodedLens = try fba.alloc(u8, encodedLensBound);
+        defer fba.free(encodedLens);
+        enc = Encoder.init(encodedLens);
+        enc.writeVarInts(u32, lens.items);
+
+        sb.lensData = try std.ArrayList(u8).initCapacity(alloc, encodedPrefixLensBuf.len + encodedLens.len);
+        sb.lensData.appendSliceAssumeCapacity(encodedPrefixLensBuf);
+        bound = try encoding.compressBound(encodedLens.len);
+        const compressedLens = try alloc.alloc(u8, bound);
+        defer alloc.free(compressedLens);
+        n = try encoding.compressAuto(compressedLens, encodedLens);
+        sb.lensData.appendSliceAssumeCapacity(compressedLens[0..n]);
+
+        // if compressed content is more than 90% of the original size - not worth it
+        // TODO: consider tweaking the value up to 80-85%
+        if (@as(f64, @floatFromInt(sb.itemsData.items.len)) >
+            0.9 * @as(f64, @floatFromInt(self.size - self.prefix.len * self.data.items.len)))
+        {
+            sb.reset();
+            try self.encodePlain(sb);
+            return EncodedMemBlock{
+                .firstItem = firstItem,
+                .prefix = self.prefix,
+                .itemsCount = @intCast(self.data.items.len),
+                .encodingType = .plain,
+            };
+        }
+
+        return EncodedMemBlock{
+            .firstItem = try alloc.dupe(u8, firstItem),
+            .prefix = try alloc.dupe(u8, self.prefix),
+            .itemsCount = @intCast(self.data.items.len),
+            .encodingType = .zstd,
+        };
+    }
+
+    fn encodePlain(self: *MemBlock, sb: *StorageBlock) !void {
         _ = self;
-        _ = alloc;
         _ = sb;
         unreachable;
     }
 };
 
 fn findPrefix(first: []const u8, second: []const u8) []const u8 {
-    var n = @min(first.len, second.len);
-    while (n > 0) {
-        if (std.mem.eql(u8, first[0..n], second[0..n])) return first[0..n];
-        n -= 1;
-    }
-
-    return first[0..0];
+    const n = @min(first.len, second.len);
+    var i: usize = 0;
+    while (i < n and first[i] == second[i]) : (i += 1) {}
+    return first[0..@intCast(i)];
 }
 
 const EntriesShard = struct {
@@ -240,17 +345,11 @@ fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void 
     unreachable;
 }
 
-fn compressZSTDLevel(alloc: Allocator, data: []const u8) ![]u8 {
-    _ = alloc;
-    _ = data;
-    unreachable;
-}
-
 const BlockHeader = struct {
-    firstItem: []u8,
-    prefix: []u8,
+    firstItem: []const u8,
+    prefix: []const u8,
     itemsCount: u32 = 0,
-    marshalType: MarshalType,
+    encodingType: EncodingTye,
     itemsBlockOffset: u64 = 0,
     itemsBlockSize: u32 = 0,
     lensBlockOffset: u64 = 0,
@@ -271,7 +370,7 @@ const TableHeader = struct {
 };
 
 const MetaIndex = struct {
-    firstItem: []u8 = undefined,
+    firstItem: []const u8 = undefined,
     blockHeadersCount: u32 = 0,
     indexBlockOffset: u64 = 0,
     indexBlockSize: u32 = 0,
@@ -339,7 +438,7 @@ const MemTable = struct {
         self.blockHeader.firstItem = encodedBlock.firstItem;
         self.blockHeader.prefix = encodedBlock.prefix;
         self.blockHeader.itemsCount = encodedBlock.itemsCount;
-        self.blockHeader.marshalType = encodedBlock.marshalType;
+        self.blockHeader.encodingType = encodedBlock.encodingType;
 
         self.tableHeader = .{
             .itemsCount = @intCast(block.data.items.len),
@@ -356,26 +455,29 @@ const MemTable = struct {
         self.blockHeader.lensBlockOffset = 0;
         self.blockHeader.lensBlockSize = @intCast(sb.lensData.items.len);
 
-        var bb = std.ArrayList(u8).empty;
-        defer bb.deinit(alloc);
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(alloc);
 
-        const compressed = try compressZSTDLevel(alloc, bb.items);
-        defer alloc.free(compressed);
+        var bound = try encoding.compressBound(buf.items.len);
+        const compressed = try alloc.alloc(u8, bound);
+        var n = try encoding.compressAuto(compressed, buf.items);
 
-        try self.indexBuf.appendSlice(alloc, compressed);
+        try self.indexBuf.appendSlice(alloc, compressed[0..n]);
 
         self.metaIndex.firstItem = self.blockHeader.firstItem;
         self.metaIndex.blockHeadersCount = 1;
         self.metaIndex.indexBlockOffset = 0;
-        self.metaIndex.indexBlockSize = @intCast(compressed.len);
+        self.metaIndex.indexBlockSize = @intCast(n);
 
-        bb.clearRetainingCapacity();
-        const marshaledMr = self.metaIndex.encode(bb.items);
+        buf.clearRetainingCapacity();
+        const encodedMetaIndex = self.metaIndex.encode(buf.items);
 
-        const compressedMr = try compressZSTDLevel(alloc, marshaledMr);
+        bound = try encoding.compressBound(encodedMetaIndex.len);
+        const compressedMr = try alloc.alloc(u8, bound);
         defer alloc.free(compressedMr);
+        n = try encoding.compressAuto(compressedMr, encodedMetaIndex);
 
-        try self.metaindexBuf.appendSlice(alloc, compressedMr);
+        try self.metaindexBuf.appendSlice(alloc, compressedMr[0..n]);
     }
 
     fn mergeIntoMemTable(self: *MemTable, readers: std.ArrayList(*BlockReader)) void {
