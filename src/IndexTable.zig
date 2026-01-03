@@ -547,39 +547,23 @@ const MemTable = struct {
         for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
 
         const blockWriter = BlockWriter.initFromMemTable(self);
-        self.tableHeader = try self.mergeTables(alloc, "", blockWriter, readers);
+        self.tableHeader = try mergeTables(alloc, "", blockWriter, readers);
     }
 
     // FIXME: make it just merge blocks
     fn mergeTables(
-        self: *MemTable,
         alloc: Allocator,
         tablePath: []const u8,
         writer: BlockWriter,
         readers: std.ArrayList(*BlockReader),
     ) !TableHeader {
-        const tableHeader = try self.mergeBlockStreams(alloc, writer, readers, null);
+        const tableHeader = try writer.mergeBlocks(alloc, readers, null);
         if (tablePath.len != 0) {
             var fbaFallback = std.heap.stackFallback(512, alloc);
             const fba = fbaFallback.get();
             try tableHeader.writeMeta(fba, tablePath);
         }
         return tableHeader;
-    }
-
-    fn mergeBlockStreams(
-        self: *MemTable,
-        alloc: Allocator,
-        writer: BlockWriter,
-        readers: std.ArrayList(*BlockReader),
-        stopped: ?std.atomic.Value(bool),
-    ) !TableHeader {
-        _ = self;
-        _ = alloc;
-        _ = writer;
-        _ = readers;
-        _ = stopped;
-        unreachable;
     }
 };
 
@@ -622,5 +606,18 @@ const BlockWriter = struct {
             .indexBuf = &memTable.indexBuf,
             .metaindexBuf = &memTable.metaindexBuf,
         };
+    }
+
+    fn mergeBlocks(
+        self: *const BlockWriter,
+        alloc: Allocator,
+        readers: std.ArrayList(*BlockReader),
+        stopped: ?*std.atomic.Value(bool),
+    ) !TableHeader {
+        _ = self;
+        _ = alloc;
+        _ = readers;
+        _ = stopped;
+        unreachable;
     }
 };
