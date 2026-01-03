@@ -546,24 +546,43 @@ const MemTable = struct {
         var outItemsCount: u64 = 0;
         for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
 
+        // TODO: init it inside mergeBlocks
         const blockWriter = BlockWriter.initFromMemTable(self);
-        self.tableHeader = try mergeTables(alloc, "", blockWriter, readers);
+        try self.mergeTables(alloc, "", blockWriter, readers);
     }
 
-    // FIXME: make it just merge blocks
+    // FIXME: make it just mergeBlocks
     fn mergeTables(
+        self: *MemTable,
         alloc: Allocator,
         tablePath: []const u8,
         writer: BlockWriter,
         readers: std.ArrayList(*BlockReader),
-    ) !TableHeader {
-        const tableHeader = try writer.mergeBlocks(alloc, readers, null);
+    ) !void {
+        try self.mergeBlocks(alloc, writer, readers, null);
         if (tablePath.len != 0) {
             var fbaFallback = std.heap.stackFallback(512, alloc);
             const fba = fbaFallback.get();
-            try tableHeader.writeMeta(fba, tablePath);
+            try self.tableHeader.writeMeta(fba, tablePath);
         }
-        return tableHeader;
+    }
+
+    fn mergeBlocks(
+        self: *MemTable,
+        alloc: Allocator,
+        writer: BlockWriter,
+        readers: std.ArrayList(*BlockReader),
+        stopped: ?*std.atomic.Value(bool),
+    ) !void {
+        const merger = try BlockMerger.init(readers);
+
+        try merger.merge(alloc, &self.tableHeader, writer, stopped);
+        self.close();
+    }
+
+    fn close(self: *MemTable) void {
+        _ = self;
+        unreachable;
     }
 };
 
@@ -607,16 +626,25 @@ const BlockWriter = struct {
             .metaindexBuf = &memTable.metaindexBuf,
         };
     }
+};
 
-    fn mergeBlocks(
-        self: *const BlockWriter,
+const BlockMerger = struct {
+    fn init(readers: std.ArrayList(*BlockReader)) !BlockMerger {
+        _ = readers;
+        unreachable;
+    }
+
+    fn merge(
+        self: *const BlockMerger,
         alloc: Allocator,
-        readers: std.ArrayList(*BlockReader),
+        tableHeader: *TableHeader,
+        writer: BlockWriter,
         stopped: ?*std.atomic.Value(bool),
-    ) !TableHeader {
+    ) !void {
         _ = self;
         _ = alloc;
-        _ = readers;
+        _ = tableHeader;
+        _ = writer;
         _ = stopped;
         unreachable;
     }
