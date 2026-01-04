@@ -576,8 +576,9 @@ const MemTable = struct {
         readers: *std.ArrayList(*BlockReader),
         stopped: ?*std.atomic.Value(bool),
     ) !void {
-        const merger = try BlockMerger.init(alloc, readers);
+        var merger = try BlockMerger.init(alloc, readers);
 
+        // TODO: perhaps easier maing it return TableHeader value and assign to MemTable
         try merger.merge(alloc, writer, &self.tableHeader, stopped);
         writer.close();
     }
@@ -587,7 +588,12 @@ const BlockReader = struct {
     block: *MemBlock,
     tableHeader: TableHeader,
 
-    current: usize,
+    // state
+
+    // currentI defines a current item of the block
+    currentI: usize,
+    // read defines if the block has been read
+    read: bool,
 
     pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
         block.sortData();
@@ -601,7 +607,8 @@ const BlockReader = struct {
                 .itemsCount = undefined,
                 .lastItem = undefined,
             },
-            .current = undefined,
+            .currentI = undefined,
+            .read = false,
         };
         return r;
     }
@@ -612,9 +619,22 @@ const BlockReader = struct {
     }
 
     pub fn blockReaderLessThan(one: *BlockReader, another: *BlockReader) bool {
-        const first = one.block.data.items[one.current];
-        const second = another.block.data.items[another.current];
+        const first = one.current();
+        const second = another.current();
         return std.mem.lessThan(u8, first, second);
+    }
+
+    pub inline fn current(self: *BlockReader) []const u8 {
+        return self.block.data.items[self.currentI];
+    }
+
+    pub fn next(self: *BlockReader) !bool {
+        // FIXME: here the difference begins between mem block reader and disk block reader
+
+        if (self.read) return false;
+
+        self.read = true;
+        return true;
     }
 };
 
@@ -641,32 +661,122 @@ const BlockWriter = struct {
 
 const BlockMerger = struct {
     heap: Heap(*BlockReader, BlockReader.blockReaderLessThan),
+    block: *MemBlock,
 
     fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerger {
-        // NOTE: here the difference begins between mem block reader and disk block reader
-
         // TODO: collect metrics and experiment with flat array on 1-3 elements
-        // TODO: experiment with Loser tree intead of heap: https://grafana.com/blog/the-loser-tree-data-structure-how-to-optimize-merges-and-make-your-programs-run-faster/
+
+        // TODO: experiment with Loser tree intead of heap:
+        // https://grafana.com/blog/the-loser-tree-data-structure-how-to-optimize-merges-and-make-your-programs-run-faster/
+
+        for (readers.items) |reader| {
+            const next = try reader.next();
+            // TODO: identify if a read block may come here,
+            // either skip this validation or create another readers array
+            std.debug.assert(next);
+        }
+
         var heap = Heap(*BlockReader, BlockReader.blockReaderLessThan).init(alloc, readers);
         heap.heapify();
 
         return .{
             .heap = heap,
+            .block = undefined,
         };
     }
 
+    fn nextReader(self: *BlockMerger) *BlockReader {
+        // TODO: test just  return self.heap.peekNext().?;
+
+        const len = self.heap.len();
+
+        if (len < 3) {
+            return self.heap.array.items[1];
+        }
+
+        const one = self.heap.array.items[1];
+        const another = self.heap.array.items[2];
+        const oneItem = one.current();
+        const anotherItem = another.current();
+        if (std.mem.lessThan(u8, oneItem, anotherItem)) {
+            return one;
+        }
+        return another;
+    }
+
     fn merge(
-        self: *const BlockMerger,
+        self: *BlockMerger,
         alloc: Allocator,
         writer: BlockWriter,
         tableHeader: *TableHeader,
         stopped: ?*std.atomic.Value(bool),
     ) !void {
+        while (true) {
+            if (self.heap.len() == 0) {
+                try self.flush(alloc, writer, tableHeader);
+                return;
+            }
+
+            if (stopped) |s| {
+                // TODO: move the error to a generic workers error,
+                // it must be handled to stop all the mergers
+                if (s.load(.acquire)) return error.Stopped;
+            }
+
+            const reader = self.heap.array.items[0];
+            var nextItem: []const u8 = undefined;
+            var hasNextItem = false;
+
+            if (self.heap.len() > 1) {
+                const nReader = self.nextReader();
+                nextItem = nReader.current();
+                hasNextItem = true;
+            }
+
+            const items = reader.block.data.items;
+            var compareEveryItem = true;
+            if (reader.currentI < items.len) {
+                const lastItem = items[items.len - 1];
+                compareEveryItem = hasNextItem and std.mem.lessThan(u8, nextItem, lastItem);
+            }
+
+            while (reader.currentI < items.len) {
+                const item = items[reader.currentI];
+                if (compareEveryItem and std.mem.lessThan(u8, nextItem, item)) {
+                    break;
+                }
+
+                if (!try self.block.add(alloc, item)) {
+                    try self.flush(alloc, writer, tableHeader);
+                    continue;
+                }
+                reader.currentI += 1;
+            }
+
+            if (reader.currentI == items.len) {
+                if (try reader.next()) {
+                    self.heap.fix(0);
+                    continue;
+                }
+
+                _ = self.heap.pop();
+                continue;
+            }
+
+            self.heap.fix(0);
+        }
+    }
+
+    fn flush(
+        self: *const BlockMerger,
+        alloc: Allocator,
+        writer: BlockWriter,
+        tableHeader: *TableHeader,
+    ) !void {
         _ = self;
-        _ = tableHeader;
         _ = alloc;
         _ = writer;
-        _ = stopped;
+        _ = tableHeader;
         unreachable;
     }
 };
