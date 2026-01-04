@@ -1,6 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const Heap = @import("stds/Heap.zig").Heap;
+
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
 
@@ -474,7 +476,7 @@ const MemTable = struct {
         }
 
         const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
-        try t.mergeIntoMemTable(alloc, readers, flushAtUs);
+        try t.mergeIntoMemTable(alloc, &readers, flushAtUs);
         return t;
     }
 
@@ -538,7 +540,7 @@ const MemTable = struct {
     fn mergeIntoMemTable(
         self: *MemTable,
         alloc: Allocator,
-        readers: std.ArrayList(*BlockReader),
+        readers: *std.ArrayList(*BlockReader),
         flushAtUs: i64,
     ) !void {
         self.flushAtUs = flushAtUs;
@@ -557,7 +559,7 @@ const MemTable = struct {
         alloc: Allocator,
         tablePath: []const u8,
         writer: BlockWriter,
-        readers: std.ArrayList(*BlockReader),
+        readers: *std.ArrayList(*BlockReader),
     ) !void {
         try self.mergeBlocks(alloc, writer, readers, null);
         if (tablePath.len != 0) {
@@ -571,24 +573,21 @@ const MemTable = struct {
         self: *MemTable,
         alloc: Allocator,
         writer: BlockWriter,
-        readers: std.ArrayList(*BlockReader),
+        readers: *std.ArrayList(*BlockReader),
         stopped: ?*std.atomic.Value(bool),
     ) !void {
-        const merger = try BlockMerger.init(readers);
+        const merger = try BlockMerger.init(alloc, readers);
 
-        try merger.merge(alloc, &self.tableHeader, writer, stopped);
-        self.close();
-    }
-
-    fn close(self: *MemTable) void {
-        _ = self;
-        unreachable;
+        try merger.merge(alloc, writer, &self.tableHeader, stopped);
+        writer.close();
     }
 };
 
 const BlockReader = struct {
     block: *MemBlock,
     tableHeader: TableHeader,
+
+    current: usize,
 
     pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
         block.sortData();
@@ -597,11 +596,12 @@ const BlockReader = struct {
         r.* = .{
             .block = block,
             .tableHeader = .{
-                .blocksCount = 0,
+                .blocksCount = undefined,
                 .firstItem = undefined,
-                .itemsCount = 0,
+                .itemsCount = undefined,
                 .lastItem = undefined,
             },
+            .current = undefined,
         };
         return r;
     }
@@ -609,6 +609,12 @@ const BlockReader = struct {
     pub fn deinit(self: *BlockReader, alloc: Allocator) void {
         self.block.deinit(alloc);
         alloc.destroy(self);
+    }
+
+    pub fn blockReaderLessThan(one: *BlockReader, another: *BlockReader) bool {
+        const first = one.block.data.items[one.current];
+        const second = another.block.data.items[another.current];
+        return std.mem.lessThan(u8, first, second);
     }
 };
 
@@ -626,24 +632,39 @@ const BlockWriter = struct {
             .metaindexBuf = &memTable.metaindexBuf,
         };
     }
+
+    fn close(self: *const BlockWriter) void {
+        _ = self;
+        unreachable;
+    }
 };
 
 const BlockMerger = struct {
-    fn init(readers: std.ArrayList(*BlockReader)) !BlockMerger {
-        _ = readers;
-        unreachable;
+    heap: Heap(*BlockReader, BlockReader.blockReaderLessThan),
+
+    fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerger {
+        // NOTE: here the difference begins between mem block reader and disk block reader
+
+        // TODO: collect metrics and experiment with flat array on 1-3 elements
+        // TODO: experiment with Loser tree intead of heap: https://grafana.com/blog/the-loser-tree-data-structure-how-to-optimize-merges-and-make-your-programs-run-faster/
+        var heap = Heap(*BlockReader, BlockReader.blockReaderLessThan).init(alloc, readers);
+        heap.heapify();
+
+        return .{
+            .heap = heap,
+        };
     }
 
     fn merge(
         self: *const BlockMerger,
         alloc: Allocator,
-        tableHeader: *TableHeader,
         writer: BlockWriter,
+        tableHeader: *TableHeader,
         stopped: ?*std.atomic.Value(bool),
     ) !void {
         _ = self;
-        _ = alloc;
         _ = tableHeader;
+        _ = alloc;
         _ = writer;
         _ = stopped;
         unreachable;
