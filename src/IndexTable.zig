@@ -11,6 +11,8 @@ const getConf = @import("conf.zig").getConf;
 
 const IndexKind = @import("Index.zig").IndexKind;
 
+const TagRecordsMerger = @import("TagRecordsMerger.zig");
+
 // TODO: make it configurable,
 // depending on used CPU model must be changed according its L1 cache size
 const maxMemBlockSize = 32 * 1024;
@@ -238,10 +240,6 @@ fn findPrefix(first: []const u8, second: []const u8) []const u8 {
     var i: usize = 0;
     while (i < n and first[i] == second[i]) : (i += 1) {}
     return first[0..@intCast(i)];
-}
-
-fn byteSliceLessThan(_: void, a: []const u8, b: []const u8) bool {
-    return std.mem.lessThan(u8, a, b);
 }
 
 const EntriesShard = struct {
@@ -886,137 +884,3 @@ const BlockMerger = struct {
         unreachable;
     }
 };
-
-pub const TagRecordsMerger = struct {
-    streamIDs: std.ArrayList([]const u8) = .empty,
-    state: *TagRecordsParseState,
-    prevState: *TagRecordsParseState,
-
-    pub fn init(alloc: Allocator) !TagRecordsMerger {
-        const state = try TagRecordsParseState.init(alloc);
-        errdefer state.deinit(alloc);
-        const prevState = try TagRecordsParseState.init(alloc);
-        errdefer prevState.deinit(alloc);
-
-        return .{
-            .state = state,
-            .prevState = prevState,
-        };
-    }
-
-    pub fn deinit(self: *TagRecordsMerger, alloc: Allocator) void {
-        self.streamIDs.deinit(alloc);
-        self.state.deinit(alloc);
-        self.prevState.deinit(alloc);
-    }
-
-    pub fn writeState(self: *TagRecordsMerger, alloc: Allocator, data: *std.ArrayList([]const u8)) !void {
-        if (self.streamIDs.items.len == 0) {
-            return;
-        }
-
-        std.mem.sortUnstable([]const u8, self.streamIDs.items, {}, byteSliceLessThan);
-        self.removeDuplicatedStreams();
-
-        self.prevState.encodePrefix(data);
-        _ = alloc;
-        unreachable;
-    }
-
-    fn removeDuplicatedStreams(self: *TagRecordsMerger) void {
-        if (self.streamIDs.items.len < 2) return;
-
-        var write: usize = 1;
-        var prev = self.streamIDs.items[0];
-
-        var i: usize = 1;
-        while (i < self.streamIDs.items.len) : (i += 1) {
-            const v = self.streamIDs.items[i];
-            if (!std.mem.eql(u8, v, prev)) {
-                self.streamIDs.items[write] = v;
-                write += 1;
-                prev = v;
-            }
-        }
-        self.streamIDs.items.len = write;
-    }
-
-    pub fn statesPrefixEqual(self: *const TagRecordsMerger) bool {
-        _ = self;
-        unreachable;
-    }
-
-    pub fn moveParsedState(self: *TagRecordsMerger, alloc: Allocator) !void {
-        try self.streamIDs.appendSlice(alloc, self.state.streamIDs.items);
-        const tmp = self.state;
-        self.state = self.prevState;
-        self.prevState = tmp;
-    }
-};
-
-pub const TagRecordsParseState = struct {
-    streamIDs: std.ArrayList([]const u8) = .empty,
-
-    pub fn init(alloc: Allocator) !*TagRecordsParseState {
-        const s = try alloc.create(TagRecordsParseState);
-        return s;
-    }
-    pub fn deinit(self: *TagRecordsParseState, alloc: Allocator) void {
-        alloc.destroy(self);
-    }
-    pub fn setup(self: *const TagRecordsParseState, item: []const u8) !void {
-        _ = self;
-        _ = item;
-        unreachable;
-    }
-
-    pub fn streamsLen(self: *const TagRecordsParseState) usize {
-        _ = self;
-        unreachable;
-    }
-
-    pub fn parseStreamIDs(self: *const TagRecordsParseState) void {
-        _ = self;
-        _ = unreachable;
-    }
-
-    pub fn encodePrefix(self: *const TagRecordsParseState, data: *std.ArrayList([]const u8)) void {
-        _ = self;
-        _ = data;
-        unreachable;
-    }
-};
-
-const testing = std.testing;
-
-test "removeDuplicatedStreams" {
-    const Case = struct {
-        input: []const []const u8,
-        expected: []const []const u8,
-    };
-    const cases = [_]Case{
-        .{
-            .input = &.{ "first", "first" },
-            .expected = &.{"first"},
-        },
-        .{
-            .input = &.{ "first", "second" },
-            .expected = &.{ "first", "second" },
-        },
-        .{
-            .input = &.{ "first", "second", "second", "third", "third", "third" },
-            .expected = &.{ "first", "second", "third" },
-        },
-    };
-
-    for (cases) |case| {
-        const alloc = testing.allocator;
-        var m = try TagRecordsMerger.init(alloc);
-        defer m.deinit(alloc);
-        try m.streamIDs.appendSlice(alloc, case.input);
-
-        m.removeDuplicatedStreams();
-
-        try testing.expectEqualSlices([]const u8, m.streamIDs.items, case.expected);
-    }
-}
