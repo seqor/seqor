@@ -9,6 +9,8 @@ const Encoder = encoding.Encoder;
 const fs = @import("fs.zig");
 const getConf = @import("conf.zig").getConf;
 
+const IndexKind = @import("Index.zig").IndexKind;
+
 // TODO: make it configurable,
 // depending on used CPU model must be changed according its L1 cache size
 const maxMemBlockSize = 32 * 1024;
@@ -17,6 +19,8 @@ const maxBlocksPerShard = 256;
 
 // TODO: worth tuning on practice
 const blocksInMemTable = 15;
+
+const maxStreamsPerRecord = 32;
 
 const filenameMeta = "metadata.json";
 
@@ -234,6 +238,10 @@ fn findPrefix(first: []const u8, second: []const u8) []const u8 {
     var i: usize = 0;
     while (i < n and first[i] == second[i]) : (i += 1) {}
     return first[0..@intCast(i)];
+}
+
+fn byteSliceLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 const EntriesShard = struct {
@@ -629,7 +637,7 @@ const BlockReader = struct {
     }
 
     pub fn next(self: *BlockReader) !bool {
-        // FIXME: here the difference begins between mem block reader and disk block reader
+        // TODO: implement disk block reading
 
         if (self.read) return false;
 
@@ -662,6 +670,8 @@ const BlockWriter = struct {
 const BlockMerger = struct {
     heap: Heap(*BlockReader, BlockReader.blockReaderLessThan),
     block: *MemBlock,
+    firstItem: []const u8 = &[_]u8{},
+    lastItem: []const u8 = &[_]u8{},
 
     fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerger {
         // TODO: collect metrics and experiment with flat array on 1-3 elements
@@ -741,7 +751,7 @@ const BlockMerger = struct {
             }
 
             while (reader.currentI < items.len) {
-                const item = items[reader.currentI];
+                const item = reader.current();
                 if (compareEveryItem and std.mem.lessThan(u8, nextItem, item)) {
                     break;
                 }
@@ -768,15 +778,245 @@ const BlockMerger = struct {
     }
 
     fn flush(
+        self: *BlockMerger,
+        alloc: Allocator,
+        writer: BlockWriter,
+        tableHeader: *TableHeader,
+    ) !void {
+        const items = self.block.data.items;
+        if (items.len == 0) {
+            return;
+        }
+
+        try self.mergeTagsRecords(alloc);
+        self.firstItem = items[0];
+        self.lastItem = items[items.len - 1];
+
+        var sb = StorageBlock{};
+        const encodedBlock = try self.block.encode(alloc, &sb);
+
+        const firstItem = encodedBlock.firstItem;
+        if (tableHeader.itemsCount == 0) {
+            tableHeader.firstItem = try alloc.dupe(u8, firstItem);
+        }
+        tableHeader.lastItem = try alloc.dupe(u8, items[items.len - 1]);
+        tableHeader.itemsCount += @intCast(items.len);
+
+        try self.writeBlock(alloc, writer, tableHeader, encodedBlock, &sb);
+        self.block.data.clearRetainingCapacity();
+        self.block.size = 0;
+        tableHeader.blocksCount += 1;
+        unreachable;
+    }
+
+    fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
+        const items = self.block.data.items;
+
+        if (items.len <= 2) {
+            return;
+        }
+
+        const firstItem = items[0];
+        if (firstItem.len > 0 and firstItem[0] > @intFromEnum(IndexKind.tagToSids)) {
+            return;
+        }
+
+        const lastItem = items[items.len - 1];
+        if (lastItem.len > 0 and lastItem[0] < @intFromEnum(IndexKind.tagToSids)) {
+            // nothing to merge, there are no tags -> stream records
+            return;
+        }
+
+        // TODO: review concurrent writing model to make sure it actually can happen
+        var blockCopy = try std.ArrayList([]const u8).initCapacity(alloc, items.len);
+        defer blockCopy.deinit(alloc);
+        blockCopy.appendSliceAssumeCapacity(items);
+        // can start mutating the original array after copying
+        self.block.data.clearRetainingCapacity();
+
+        var tagRecordsMerger = try TagRecordsMerger.init(alloc);
+
+        for (0..items.len) |i| {
+            if (items[i].len == 0 or items[i][0] != @intFromEnum(IndexKind.tagToSids) or i == 0 or i == items.len - 1) {
+                try tagRecordsMerger.writeState(alloc, &self.block.data);
+                continue;
+            }
+
+            try tagRecordsMerger.state.setup(items[i]);
+            if (tagRecordsMerger.state.streamsLen() > maxStreamsPerRecord) {
+                try tagRecordsMerger.writeState(alloc, &self.block.data);
+                continue;
+            }
+
+            if (!tagRecordsMerger.statesPrefixEqual()) {
+                try tagRecordsMerger.writeState(alloc, &self.block.data);
+            }
+
+            tagRecordsMerger.state.parseStreamIDs();
+            try tagRecordsMerger.moveParsedState(alloc);
+
+            if (tagRecordsMerger.streamIDs.items.len >= maxStreamsPerRecord) {
+                try tagRecordsMerger.writeState(alloc, &self.block.data);
+            }
+        }
+
+        std.debug.assert(tagRecordsMerger.streamIDs.items.len == 0);
+        // if (!std.sort.isSorted([]const u8, self.block.data.items, void, std.mem.lessThan)) {
+        //     // defend against parallel writing leaving the state unmerged,
+        //     // fallback to the original data
+        //     self.block.data.clearRetainingCapacity();
+        //     self.block.data.appendSliceAssumeCapacity(blockCopy.items);
+        // }
+    }
+
+    fn writeBlock(
         self: *const BlockMerger,
         alloc: Allocator,
         writer: BlockWriter,
         tableHeader: *TableHeader,
+        encodedBlock: EncodedMemBlock,
+        sb: *StorageBlock,
     ) !void {
         _ = self;
         _ = alloc;
         _ = writer;
         _ = tableHeader;
+        _ = encodedBlock;
+        _ = sb;
         unreachable;
     }
 };
+
+pub const TagRecordsMerger = struct {
+    streamIDs: std.ArrayList([]const u8) = .empty,
+    state: *TagRecordsParseState,
+    prevState: *TagRecordsParseState,
+
+    pub fn init(alloc: Allocator) !TagRecordsMerger {
+        const state = try TagRecordsParseState.init(alloc);
+        errdefer state.deinit(alloc);
+        const prevState = try TagRecordsParseState.init(alloc);
+        errdefer prevState.deinit(alloc);
+
+        return .{
+            .state = state,
+            .prevState = prevState,
+        };
+    }
+
+    pub fn deinit(self: *TagRecordsMerger, alloc: Allocator) void {
+        self.streamIDs.deinit(alloc);
+        self.state.deinit(alloc);
+        self.prevState.deinit(alloc);
+    }
+
+    pub fn writeState(self: *TagRecordsMerger, alloc: Allocator, data: *std.ArrayList([]const u8)) !void {
+        if (self.streamIDs.items.len == 0) {
+            return;
+        }
+
+        std.mem.sortUnstable([]const u8, self.streamIDs.items, {}, byteSliceLessThan);
+        self.removeDuplicatedStreams();
+
+        self.prevState.encodePrefix(data);
+        _ = alloc;
+        unreachable;
+    }
+
+    fn removeDuplicatedStreams(self: *TagRecordsMerger) void {
+        if (self.streamIDs.items.len < 2) return;
+
+        var write: usize = 1;
+        var prev = self.streamIDs.items[0];
+
+        var i: usize = 1;
+        while (i < self.streamIDs.items.len) : (i += 1) {
+            const v = self.streamIDs.items[i];
+            if (!std.mem.eql(u8, v, prev)) {
+                self.streamIDs.items[write] = v;
+                write += 1;
+                prev = v;
+            }
+        }
+        self.streamIDs.items.len = write;
+    }
+
+    pub fn statesPrefixEqual(self: *const TagRecordsMerger) bool {
+        _ = self;
+        unreachable;
+    }
+
+    pub fn moveParsedState(self: *TagRecordsMerger, alloc: Allocator) !void {
+        try self.streamIDs.appendSlice(alloc, self.state.streamIDs.items);
+        const tmp = self.state;
+        self.state = self.prevState;
+        self.prevState = tmp;
+    }
+};
+
+pub const TagRecordsParseState = struct {
+    streamIDs: std.ArrayList([]const u8) = .empty,
+
+    pub fn init(alloc: Allocator) !*TagRecordsParseState {
+        const s = try alloc.create(TagRecordsParseState);
+        return s;
+    }
+    pub fn deinit(self: *TagRecordsParseState, alloc: Allocator) void {
+        alloc.destroy(self);
+    }
+    pub fn setup(self: *const TagRecordsParseState, item: []const u8) !void {
+        _ = self;
+        _ = item;
+        unreachable;
+    }
+
+    pub fn streamsLen(self: *const TagRecordsParseState) usize {
+        _ = self;
+        unreachable;
+    }
+
+    pub fn parseStreamIDs(self: *const TagRecordsParseState) void {
+        _ = self;
+        _ = unreachable;
+    }
+
+    pub fn encodePrefix(self: *const TagRecordsParseState, data: *std.ArrayList([]const u8)) void {
+        _ = self;
+        _ = data;
+        unreachable;
+    }
+};
+
+const testing = std.testing;
+
+test "removeDuplicatedStreams" {
+    const Case = struct {
+        input: []const []const u8,
+        expected: []const []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .input = &.{ "first", "first" },
+            .expected = &.{"first"},
+        },
+        .{
+            .input = &.{ "first", "second" },
+            .expected = &.{ "first", "second" },
+        },
+        .{
+            .input = &.{ "first", "second", "second", "third", "third", "third" },
+            .expected = &.{ "first", "second", "third" },
+        },
+    };
+
+    for (cases) |case| {
+        const alloc = testing.allocator;
+        var m = try TagRecordsMerger.init(alloc);
+        defer m.deinit(alloc);
+        try m.streamIDs.appendSlice(alloc, case.input);
+
+        m.removeDuplicatedStreams();
+
+        try testing.expectEqualSlices([]const u8, m.streamIDs.items, case.expected);
+    }
+}

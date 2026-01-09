@@ -52,11 +52,17 @@ fn escapeTag(alloc: Allocator, buf: []const u8) !std.ArrayList(u8) {
     return res;
 }
 
-const IndexKind = enum(u8) {
+pub const IndexKind = enum(u8) {
     sid = 0,
     sidToTags = 1,
     tagToSids = 2,
 };
+
+comptime {
+    if (@typeInfo(IndexKind).@"enum".fields.len != 3) {
+        @compileError("fix IndexKind usage in IndexTable.mergeTagsRecords");
+    }
+}
 
 const Self = @This();
 
