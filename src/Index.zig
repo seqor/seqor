@@ -7,51 +7,6 @@ const IndexTable = @import("IndexTable.zig");
 
 const Encoder = @import("encoding").Encoder;
 
-const ControlChar = enum(u8) {
-    escape = 0,
-    tagTerminator = 1,
-};
-
-fn encodeTag(alloc: Allocator, tag: Field) ![]u8 {
-    var encodedKey = try escapeTag(alloc, tag.key);
-    defer encodedKey.deinit(alloc);
-
-    var encodedValue = try escapeTag(alloc, tag.value);
-    defer encodedValue.deinit(alloc);
-
-    var result = try alloc.alloc(u8, encodedKey.items.len + encodedValue.items.len);
-    @memcpy(result[0..encodedKey.items.len], encodedKey.items);
-    @memcpy(result[encodedKey.items.len..], encodedValue.items);
-
-    return result;
-}
-
-fn escapeTag(alloc: Allocator, buf: []const u8) !std.ArrayList(u8) {
-    var res = try std.ArrayList(u8).initCapacity(alloc, buf.len);
-
-    var last: usize = 0;
-    for (0..buf.len) |i| {
-        switch (buf[i]) {
-            @intFromEnum(ControlChar.escape) => {
-                try res.appendSlice(alloc, buf[last .. i + 1]);
-                try res.append(alloc, '0');
-                last = i + 1;
-            },
-            @intFromEnum(ControlChar.tagTerminator) => {
-                try res.appendSlice(alloc, buf[last .. i + 1]);
-                try res.append(alloc, '1');
-                last = i + 1;
-            },
-            else => {},
-        }
-    }
-
-    if (last < buf.len) {
-        try res.appendSlice(alloc, buf[last..]);
-    }
-    return res;
-}
-
 pub const IndexKind = enum(u8) {
     sid = 0,
     sidToTags = 1,
@@ -94,6 +49,9 @@ pub fn indexStream(self: *Self, alloc: Allocator, sid: SID, tags: []Field, encod
     entries[ei] = sidBuf;
     ei += 1;
 
+    const tenantID = enc.buf[0..16];
+    const streamID = enc.buf[16..];
+
     // index stream -> tags
     // it's stored in index instead of data
     // in order not to duplicate the tags data in every block
@@ -104,21 +62,16 @@ pub fn indexStream(self: *Self, alloc: Allocator, sid: SID, tags: []Field, encod
     entries[ei] = sidTagsBuf;
     ei += 1;
 
-    var stackFba = std.heap.stackFallback(128, alloc);
-    var fba = stackFba.get();
     // index inverted tag -> stream
     for (tags) |tag| {
-        const bufSize = 1 + SID.encodeBound + tag.key.len + tag.value.len;
+        const bufSize = 1 + SID.encodeBound + tag.encodeIndexTagBound();
         const tagSidsBuf = try alloc.alloc(u8, bufSize);
 
         tagSidsBuf[0] = @intFromEnum(IndexKind.tagToSids);
-        @memcpy(tagSidsBuf[1..17], enc.buf[0..16]);
-        const encodedTag = try encodeTag(fba, tag);
-        @memcpy(tagSidsBuf[17..], encodedTag);
-        const offset = 17 + tag.key.len + tag.value.len;
-        @memcpy(tagSidsBuf[offset..], enc.buf[16..]);
+        @memcpy(tagSidsBuf[1..17], tenantID);
+        const offset = tag.encodeIndexTag(tagSidsBuf[17..]);
+        @memcpy(tagSidsBuf[17 + offset ..], streamID);
 
-        fba.free(encodedTag);
         entries[ei] = tagSidsBuf;
         ei += 1;
     }

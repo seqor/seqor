@@ -5,7 +5,7 @@ const Decoder = @import("encoding").Decoder;
 
 const sizing = @import("inmem/sizing.zig");
 
-const maxTenantIDLen = 16;
+pub const maxTenantIDLen = 16;
 
 pub const SID = struct {
     tenantID: []const u8,
@@ -41,9 +41,73 @@ pub const SID = struct {
     }
 };
 
+const ControlChar = enum(u8) {
+    escape = 0,
+    tagTerminator = 1,
+};
+
 pub const Field = struct {
     key: []const u8,
     value: []const u8,
+
+    pub fn encodeIndexTagBound(self: Field) usize {
+        var res = self.key.len + self.value.len;
+        res += count(u8, self.key, @intFromEnum(ControlChar.escape));
+        res += count(u8, self.key, @intFromEnum(ControlChar.tagTerminator));
+        res += count(u8, self.value, @intFromEnum(ControlChar.escape));
+        res += count(u8, self.value, @intFromEnum(ControlChar.tagTerminator));
+        return res;
+    }
+    pub fn count(comptime T: type, haystack: []const T, needle: T) usize {
+        var i: usize = 0;
+        var found: usize = 0;
+
+        while (std.mem.indexOfScalarPos(T, haystack, i, needle)) |idx| {
+            i = idx + 1;
+            found += 1;
+        }
+
+        return found;
+    }
+
+    pub fn encodeIndexTag(self: Field, dst: []u8) usize {
+        const offset = escapeTag(dst, self.key);
+        return offset + escapeTag(dst[offset..], self.value);
+    }
+
+    fn escapeTag(dst: []u8, src: []const u8) usize {
+        var offset: usize = 0;
+        var last: usize = 0;
+        for (0..src.len) |i| {
+            switch (src[i]) {
+                @intFromEnum(ControlChar.escape) => {
+                    const len = i + 1 - last;
+                    @memcpy(dst[offset..][0..len], src[last .. i + 1]);
+                    offset += len;
+                    dst[offset] = '0';
+                    offset += 1;
+                    last = i + 1;
+                },
+                @intFromEnum(ControlChar.tagTerminator) => {
+                    const len = i + 1 - last;
+                    @memcpy(dst[offset..][0..len], src[last .. i + 1]);
+                    offset += len;
+                    dst[offset] = '1';
+                    offset += 1;
+                    last = i + 1;
+                },
+                else => {},
+            }
+        }
+
+        if (last < src.len) {
+            const remaining = src.len - last;
+            @memcpy(dst[offset..][0..remaining], src[last..]);
+            offset += remaining;
+        }
+
+        return offset;
+    }
 };
 
 // Line is an internal representation of a log line,
@@ -68,4 +132,47 @@ pub fn lineLessThan(_: void, one: *const Line, another: *const Line) bool {
 
 pub fn fieldLessThan(_: void, one: Field, another: Field) bool {
     return std.mem.lessThan(u8, one.key, another.key);
+}
+
+const testing = std.testing;
+
+test "Field.encodeIndexTag" {
+    const alloc = testing.allocator;
+    const Case = struct {
+        key: []const u8,
+        value: []const u8,
+        expected: []const u8,
+    };
+
+    const cases = [_]Case{
+        .{
+            .key = "key",
+            .value = "value",
+            .expected = "keyvalue",
+        },
+        .{
+            .key = "ke\x00y",
+            .value = "value",
+            .expected = "ke\x000yvalue",
+        },
+        .{
+            .key = "key",
+            .value = "val\x01ue",
+            .expected = "keyval\x011ue",
+        },
+        .{
+            .key = "k\x00e\x01y",
+            .value = "v\x01al\x00ue",
+            .expected = "k\x000e\x011yv\x011al\x000ue",
+        },
+    };
+    for (cases) |case| {
+        const f = Field{ .key = case.key, .value = case.value };
+        const bound = f.encodeIndexTagBound();
+        const buf = try alloc.alloc(u8, bound);
+        defer alloc.free(buf);
+
+        _ = f.encodeIndexTag(buf);
+        try testing.expectEqualSlices(u8, case.expected, buf);
+    }
 }
