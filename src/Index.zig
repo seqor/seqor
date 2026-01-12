@@ -8,8 +8,12 @@ const IndexTable = @import("IndexTable.zig");
 const Encoder = @import("encoding").Encoder;
 
 pub const IndexKind = enum(u8) {
+    // tenant:stream, to writes the key exists
     sid = 0,
+    // tenant:stream => tags
     sidToTags = 1,
+    // tenant:key:value => streams,
+    // inverted index to find streams with the given tag
     tagToSids = 2,
 };
 

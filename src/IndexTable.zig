@@ -865,6 +865,8 @@ const BlockMerger = struct {
         //     self.block.data.clearRetainingCapacity();
         //     self.block.data.appendSliceAssumeCapacity(blockCopy.items);
         // }
+
+        unreachable;
     }
 
     fn writeBlock(

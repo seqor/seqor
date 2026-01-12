@@ -50,12 +50,18 @@ pub const Field = struct {
     key: []const u8,
     value: []const u8,
 
+    pub fn eql(self: Field, another: Field) bool {
+        return std.mem.eql(u8, self.key, another.key) and
+            std.mem.eql(u8, self.value, another.value);
+    }
+
     pub fn encodeIndexTagBound(self: Field) usize {
         var res = self.key.len + self.value.len;
         res += count(u8, self.key, @intFromEnum(ControlChar.escape));
         res += count(u8, self.key, @intFromEnum(ControlChar.tagTerminator));
         res += count(u8, self.value, @intFromEnum(ControlChar.escape));
         res += count(u8, self.value, @intFromEnum(ControlChar.tagTerminator));
+        res += 2; // two terminators
         return res;
     }
     pub fn count(comptime T: type, haystack: []const T, needle: T) usize {
@@ -71,8 +77,13 @@ pub const Field = struct {
     }
 
     pub fn encodeIndexTag(self: Field, dst: []u8) usize {
-        const offset = escapeTag(dst, self.key);
-        return offset + escapeTag(dst[offset..], self.value);
+        var offset = escapeTag(dst, self.key);
+        dst[offset] = @intFromEnum(ControlChar.tagTerminator);
+        offset += 1;
+        offset += escapeTag(dst[offset..], self.value);
+        dst[offset] = @intFromEnum(ControlChar.tagTerminator);
+        offset += 1;
+        return offset;
     }
 
     fn escapeTag(dst: []u8, src: []const u8) usize {
@@ -81,19 +92,29 @@ pub const Field = struct {
         for (0..src.len) |i| {
             switch (src[i]) {
                 @intFromEnum(ControlChar.escape) => {
-                    const len = i + 1 - last;
-                    @memcpy(dst[offset..][0..len], src[last .. i + 1]);
-                    offset += len;
-                    dst[offset] = '0';
-                    offset += 1;
+                    // Copy everything before the escape char
+                    const len = i - last;
+                    if (len > 0) {
+                        @memcpy(dst[offset..][0..len], src[last..i]);
+                        offset += len;
+                    }
+                    // Write escape sequence: escape char + '0'
+                    dst[offset] = @intFromEnum(ControlChar.escape);
+                    dst[offset + 1] = '0';
+                    offset += 2;
                     last = i + 1;
                 },
                 @intFromEnum(ControlChar.tagTerminator) => {
-                    const len = i + 1 - last;
-                    @memcpy(dst[offset..][0..len], src[last .. i + 1]);
-                    offset += len;
-                    dst[offset] = '1';
-                    offset += 1;
+                    // Copy everything before the terminator
+                    const len = i - last;
+                    if (len > 0) {
+                        @memcpy(dst[offset..][0..len], src[last..i]);
+                        offset += len;
+                    }
+                    // Write escape sequence: escape char + '1'
+                    dst[offset] = @intFromEnum(ControlChar.escape);
+                    dst[offset + 1] = '1';
+                    offset += 2;
                     last = i + 1;
                 },
                 else => {},
@@ -107,6 +128,76 @@ pub const Field = struct {
         }
 
         return offset;
+    }
+
+    pub const UnescapeResult = struct {
+        srcConsumed: usize,
+        dstWritten: usize,
+    };
+
+    pub fn decodeIndexTag(self: *Field, src: []u8) usize {
+        const keyResult = unescapeTagValue(src);
+        self.key = src[0..keyResult.dstWritten];
+
+        const valueResult = unescapeTagValue(src[keyResult.srcConsumed..]);
+        self.value = src[keyResult.srcConsumed..][0..valueResult.dstWritten];
+
+        return keyResult.srcConsumed + valueResult.srcConsumed;
+    }
+
+    fn unescapeTagValue(src: []u8) UnescapeResult {
+        // Find the terminator
+        const n = std.mem.indexOfScalar(u8, src, @intFromEnum(ControlChar.tagTerminator)) orelse {
+            std.debug.panic("cannot find tag terminator", .{});
+        };
+
+        // Unescape in-place: read from src[0..n], write back to src[0..]
+        var readPos: usize = 0;
+        var writePos: usize = 0;
+
+        while (readPos < n) {
+            const escapeIdx = std.mem.indexOfScalarPos(u8, src[0..n], readPos, @intFromEnum(ControlChar.escape));
+
+            if (escapeIdx == null) {
+                // No more escape chars, copy remaining data
+                const remaining = n - readPos;
+                if (writePos != readPos) {
+                    std.mem.copyForwards(u8, src[writePos..][0..remaining], src[readPos..n]);
+                }
+                writePos += remaining;
+                break;
+            }
+
+            const idx = escapeIdx.?;
+            // Copy data before the escape char
+            const chunkLen = idx - readPos;
+            if (chunkLen > 0 and writePos != readPos) {
+                std.mem.copyForwards(u8, src[writePos..][0..chunkLen], src[readPos..idx]);
+            }
+            writePos += chunkLen;
+            readPos = idx + 1;
+
+            std.debug.assert(readPos < n);
+
+            // Process the escaped character
+            switch (src[readPos]) {
+                '0' => {
+                    src[writePos] = @intFromEnum(ControlChar.escape);
+                    writePos += 1;
+                },
+                '1' => {
+                    src[writePos] = @intFromEnum(ControlChar.tagTerminator);
+                    writePos += 1;
+                },
+                else => std.debug.panic("unsupported escape char: {c}", .{src[readPos]}),
+            }
+            readPos += 1;
+        }
+
+        return .{
+            .srcConsumed = n + 1, // include the terminator
+            .dstWritten = writePos,
+        };
     }
 };
 
@@ -148,22 +239,22 @@ test "Field.encodeIndexTag" {
         .{
             .key = "key",
             .value = "value",
-            .expected = "keyvalue",
+            .expected = "key\x01value\x01",
         },
         .{
             .key = "ke\x00y",
             .value = "value",
-            .expected = "ke\x000yvalue",
+            .expected = "ke\x000y\x01value\x01",
         },
         .{
             .key = "key",
             .value = "val\x01ue",
-            .expected = "keyval\x011ue",
+            .expected = "key\x01val\x001ue\x01",
         },
         .{
             .key = "k\x00e\x01y",
             .value = "v\x01al\x00ue",
-            .expected = "k\x000e\x011yv\x011al\x000ue",
+            .expected = "k\x000e\x001y\x01v\x001al\x000ue\x01",
         },
     };
     for (cases) |case| {
@@ -172,7 +263,21 @@ test "Field.encodeIndexTag" {
         const buf = try alloc.alloc(u8, bound);
         defer alloc.free(buf);
 
-        _ = f.encodeIndexTag(buf);
-        try testing.expectEqualSlices(u8, case.expected, buf);
+        const encodedLen = f.encodeIndexTag(buf);
+        try testing.expectEqualSlices(u8, case.expected, buf[0..encodedLen]);
+
+        // Test round-trip: decode and verify we get back the original key/value
+        const decodeBuf = try alloc.alloc(u8, bound);
+        defer alloc.free(decodeBuf);
+        @memcpy(decodeBuf[0..encodedLen], buf[0..encodedLen]);
+
+        var decoded = Field{ .key = "", .value = "" };
+        const decodeOffset = decoded.decodeIndexTag(decodeBuf[0..encodedLen]);
+
+        try testing.expectEqualSlices(u8, case.key, decoded.key);
+        try testing.expectEqualSlices(u8, case.value, decoded.value);
+        try testing.expectEqual(decodeBuf.len, decodeOffset);
+
+        try testing.expect(f.eql(.{ .key = decoded.key, .value = decoded.value }));
     }
 }

@@ -75,8 +75,11 @@ fn removeDuplicatedStreams(self: *Self) void {
 }
 
 pub fn statesPrefixEqual(self: *const Self) bool {
-    _ = self;
-    unreachable;
+    if (!std.mem.eql(u8, self.state.tenantID, self.prevState.tenantID)) return false;
+
+    if (!self.state.tag.eql(self.prevState.tag)) return false;
+
+    return true;
 }
 
 pub fn moveParsedState(self: *Self, alloc: Allocator) !void {
