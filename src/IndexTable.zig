@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Heap = @import("stds/Heap.zig").Heap;
+const MemOrder = @import("stds/sort.zig").MemOrder;
 
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
@@ -56,6 +57,11 @@ const MemBlock = struct {
     pub fn deinit(self: *MemBlock, alloc: Allocator) void {
         self.data.deinit(alloc);
         alloc.destroy(self);
+    }
+
+    pub fn reset(self: *MemBlock) void {
+        self.data.clearRetainingCapacity();
+        self.prefix = undefined;
     }
 
     pub fn add(self: *MemBlock, alloc: Allocator, entry: []const u8) !bool {
@@ -786,25 +792,29 @@ const BlockMerger = struct {
             return;
         }
 
-        try self.mergeTagsRecords(alloc);
         self.firstItem = items[0];
         self.lastItem = items[items.len - 1];
+        try self.mergeTagsRecords(alloc);
 
-        var sb = StorageBlock{};
-        const encodedBlock = try self.block.encode(alloc, &sb);
-
-        const firstItem = encodedBlock.firstItem;
-        if (tableHeader.itemsCount == 0) {
-            tableHeader.firstItem = try alloc.dupe(u8, firstItem);
+        if (self.block.data.items.len == 0) {
+            // nothing to flush
+            return;
         }
-        tableHeader.lastItem = try alloc.dupe(u8, items[items.len - 1]);
-        tableHeader.itemsCount += @intCast(items.len);
 
-        try self.writeBlock(alloc, writer, tableHeader, encodedBlock, &sb);
-        self.block.data.clearRetainingCapacity();
-        self.block.size = 0;
-        tableHeader.blocksCount += 1;
-        unreachable;
+        const blockLastItem = self.block.data.items[self.block.data.items.len - 1];
+
+        // TODO: move this validation to tests and test the block is sorted
+        std.debug.assert(!std.mem.lessThan(u8, self.block.data.items[0], self.firstItem));
+        std.debug.assert(std.mem.lessThan(u8, blockLastItem, self.lastItem) or
+            std.mem.eql(u8, blockLastItem, self.lastItem));
+
+        tableHeader.itemsCount += self.block.data.items.len;
+        if (tableHeader.firstItem.len == 0) {
+            tableHeader.firstItem = self.block.data.items[0];
+        }
+        tableHeader.lastItem = blockLastItem;
+        self.writeBlock(alloc, writer, tableHeader);
+        self.block.reset();
     }
 
     fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
@@ -850,7 +860,7 @@ const BlockMerger = struct {
                 try tagRecordsMerger.writeState(alloc, &self.block.data);
             }
 
-            tagRecordsMerger.state.parseStreamIDs();
+            try tagRecordsMerger.state.parseStreamIDs(alloc);
             try tagRecordsMerger.moveParsedState(alloc);
 
             if (tagRecordsMerger.streamIDs.items.len >= maxStreamsPerRecord) {
@@ -859,14 +869,15 @@ const BlockMerger = struct {
         }
 
         std.debug.assert(tagRecordsMerger.streamIDs.items.len == 0);
-        // if (!std.sort.isSorted([]const u8, self.block.data.items, void, std.mem.lessThan)) {
-        //     // defend against parallel writing leaving the state unmerged,
-        //     // fallback to the original data
-        //     self.block.data.clearRetainingCapacity();
-        //     self.block.data.appendSliceAssumeCapacity(blockCopy.items);
-        // }
+        const isSorted = std.sort.isSorted([]const u8, self.block.data.items, {}, MemOrder(u8).lessThanConst);
+        if (!isSorted) {
+            // defend against parallel writing leaving the state unmerged,
+            // fallback to the original data
+            self.block.data.clearRetainingCapacity();
+            self.block.data.appendSliceAssumeCapacity(blockCopy.items);
+        }
 
-        unreachable;
+        tagRecordsMerger.deinit(alloc);
     }
 
     fn writeBlock(
@@ -874,15 +885,11 @@ const BlockMerger = struct {
         alloc: Allocator,
         writer: BlockWriter,
         tableHeader: *TableHeader,
-        encodedBlock: EncodedMemBlock,
-        sb: *StorageBlock,
-    ) !void {
+    ) void {
         _ = self;
         _ = alloc;
         _ = writer;
         _ = tableHeader;
-        _ = encodedBlock;
-        _ = sb;
         unreachable;
     }
 };

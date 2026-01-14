@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
+const Decoder = encoding.Decoder;
 
 const IndexKind = @import("Index.zig").IndexKind;
 
@@ -43,9 +44,20 @@ pub fn streamsLen(self: *const Self) usize {
     return self.streamsRaw.len / 16;
 }
 
-pub fn parseStreamIDs(self: *const Self) void {
-    _ = self;
-    _ = unreachable;
+pub fn parseStreamIDs(self: *Self, alloc: Allocator) !void {
+    if (self.streamsRaw.len == 0) {
+        return;
+    }
+    const n = self.streamsRaw.len / 16;
+    try self.streamIDs.ensureUnusedCapacity(alloc, n);
+    for (0..n) |i| {
+        const idBuf = self.streamsRaw[i * 16 .. (i + 1) * 16];
+        var dec = Decoder.init(idBuf);
+        const v = dec.readInt(u128);
+        self.streamIDs.appendAssumeCapacity(v);
+    }
+    // it's a slice from the item, so it's safe to override the len;
+    self.streamsRaw.len = 0;
 }
 
 pub fn encodePrefixBound(self: *const Self) usize {
@@ -58,3 +70,4 @@ pub fn encodePrefix(self: *const Self, dst: []u8) void {
     enc.writePadded(self.tenantID, maxTenantIDLen);
     _ = self.tag.encodeIndexTag(enc.buf[enc.offset..]);
 }
+

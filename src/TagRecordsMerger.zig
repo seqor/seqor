@@ -6,10 +6,6 @@ const Encoder = encoding.Encoder;
 
 const maxTenantIDLen = @import("store/lines.zig").maxTenantIDLen;
 
-fn u128LessThan(_: void, a: u128, b: u128) bool {
-    return a < b;
-}
-
 const TagRecordsParseState = @import("TagRecordsParseState.zig");
 
 const Self = @This();
@@ -41,7 +37,7 @@ pub fn writeState(self: *Self, alloc: Allocator, data: *std.ArrayList([]const u8
         return;
     }
 
-    std.mem.sortUnstable(u128, self.streamIDs.items, {}, u128LessThan);
+    std.mem.sortUnstable(u128, self.streamIDs.items, {}, std.sort.asc(u128));
     self.removeDuplicatedStreams();
 
     const encodePrefixBound = self.prevState.encodePrefixBound();
