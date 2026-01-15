@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const Heap = @import("stds/Heap.zig").Heap;
@@ -24,6 +25,8 @@ const maxBlocksPerShard = 256;
 const blocksInMemTable = 15;
 
 const maxStreamsPerRecord = 32;
+
+const maxIndexBlockSize = 64 * 1024;
 
 const filenameMeta = "metadata.json";
 
@@ -73,13 +76,14 @@ const MemBlock = struct {
     }
 
     pub fn sortData(self: *MemBlock) void {
-        // TODO: evaluate the chances of the data being sorted, might improve performance a lot
+        // TODO: evaluate the chances of the data being sorted, might improve performance a lot,
+        // collect the metrics and if it's common enough optimize the algorithm
 
-        self.setPrefixes();
+        self.setPrefix();
         self.sort();
     }
 
-    pub fn setPrefixes(self: *MemBlock) void {
+    pub fn setPrefix(self: *MemBlock) void {
         if (self.data.items.len == 0) return;
 
         if (self.data.items.len == 1) {
@@ -98,6 +102,14 @@ const MemBlock = struct {
         }
 
         self.prefix = prefix;
+    }
+    pub fn setPrefixSorted(self: *MemBlock) void {
+        if (self.data.items.len <= 1) {
+            self.prefix = "";
+            return;
+        }
+
+        self.prefix = findPrefix(self.data.items[0], self.data.items[self.data.items.len - 1]);
     }
 
     pub fn sort(self: *MemBlock) void {
@@ -119,7 +131,12 @@ const MemBlock = struct {
         sb: *StorageBlock,
     ) !EncodedMemBlock {
         std.debug.assert(self.data.items.len != 0);
+        // this API can't be called on unsorted data
+        if (builtin.is_test) {
+            std.debug.assert(std.sort.isSorted([]const u8, self.data.items, {}, MemOrder(u8).lessThanConst));
+        }
 
+        self.setPrefixSorted();
         const firstItem = self.data.items[0];
 
         // TODO: consider making len limit 128
@@ -388,12 +405,18 @@ const BlockHeader = struct {
     itemsBlockSize: u32 = 0,
     lensBlockSize: u32 = 0,
 
+    pub fn reset(self: *BlockHeader) void {
+        self.* = .{ .firstItem = undefined, .prefix = undefined, .encodingType = undefined };
+    }
+
     // [len:n][firstItem:len][len:n][prefix:len][count:4][type:1][offset:8][size:4][offset:8][size:4] = bound + len + 29
-    fn encode(self: *const BlockHeader, alloc: Allocator) ![]u8 {
+    pub fn bound(self: *const BlockHeader) usize {
         const firstItemLenBound = Encoder.varIntBound(self.firstItem.len);
         const prefixLenBound = Encoder.varIntBound(self.prefix.len);
-        const size = firstItemLenBound + prefixLenBound + self.firstItem.len + self.prefix.len + 29;
-        const buf = try alloc.alloc(u8, size);
+        return firstItemLenBound + prefixLenBound + self.firstItem.len + self.prefix.len + 29;
+    }
+
+    pub fn encode(self: *const BlockHeader, buf: []u8) void {
         var enc = Encoder.init(buf);
 
         enc.writeString(self.firstItem);
@@ -404,6 +427,12 @@ const BlockHeader = struct {
         enc.writeInt(u64, self.lensBlockOffset);
         enc.writeInt(u32, self.itemsBlockSize);
         enc.writeInt(u32, self.lensBlockSize);
+    }
+
+    pub fn encodeAlloc(self: *const BlockHeader, alloc: Allocator) ![]u8 {
+        const size = self.bound();
+        const buf = try alloc.alloc(u8, size);
+        self.encode(buf);
 
         return buf;
     }
@@ -432,7 +461,7 @@ const TableHeader = struct {
 };
 
 const MetaIndex = struct {
-    firstItem: []const u8 = undefined,
+    firstItem: []const u8 = "",
     blockHeadersCount: u32 = 0,
     indexBlockOffset: u64 = 0,
     indexBlockSize: u32 = 0,
@@ -475,7 +504,6 @@ const MemTable = struct {
         if (blocks.len == 1) {
             // nothing to merge
             const b = blocks[0];
-            b.sortData();
 
             const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
             try t.setup(alloc, b, flushAtUs);
@@ -501,6 +529,7 @@ const MemTable = struct {
     }
 
     fn setup(self: *MemTable, alloc: Allocator, block: *MemBlock, flushAtUs: i64) !void {
+        block.sortData();
         self.flushAtUs = flushAtUs;
 
         var sb = StorageBlock{};
@@ -525,7 +554,7 @@ const MemTable = struct {
         self.blockHeader.lensBlockOffset = 0;
         self.blockHeader.lensBlockSize = @intCast(sb.lensData.items.len);
 
-        const encodedBlockHeader = try self.blockHeader.encode(alloc);
+        const encodedBlockHeader = try self.blockHeader.encodeAlloc(alloc);
         defer alloc.free(encodedBlockHeader);
 
         var bound = try encoding.compressBound(encodedBlockHeader.len);
@@ -561,8 +590,8 @@ const MemTable = struct {
         for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
 
         // TODO: init it inside mergeBlocks
-        const blockWriter = BlockWriter.initFromMemTable(self);
-        try self.mergeTables(alloc, "", blockWriter, readers);
+        var blockWriter = BlockWriter.initFromMemTable(self);
+        try self.mergeTables(alloc, "", &blockWriter, readers);
     }
 
     // FIXME: make it just mergeBlocks
@@ -570,7 +599,7 @@ const MemTable = struct {
         self: *MemTable,
         alloc: Allocator,
         tablePath: []const u8,
-        writer: BlockWriter,
+        writer: *BlockWriter,
         readers: *std.ArrayList(*BlockReader),
     ) !void {
         try self.mergeBlocks(alloc, writer, readers, null);
@@ -584,13 +613,13 @@ const MemTable = struct {
     fn mergeBlocks(
         self: *MemTable,
         alloc: Allocator,
-        writer: BlockWriter,
+        writer: *BlockWriter,
         readers: *std.ArrayList(*BlockReader),
         stopped: ?*std.atomic.Value(bool),
     ) !void {
         var merger = try BlockMerger.init(alloc, readers);
 
-        // TODO: perhaps easier maing it return TableHeader value and assign to MemTable
+        // TODO: perhaps easier making it return TableHeader value and assign to MemTable
         try merger.merge(alloc, writer, &self.tableHeader, stopped);
         writer.close();
     }
@@ -656,6 +685,15 @@ const BlockWriter = struct {
     indexBuf: *std.ArrayList(u8),
     metaindexBuf: *std.ArrayList(u8),
 
+    bh: BlockHeader = .{ .firstItem = undefined, .prefix = undefined, .encodingType = undefined },
+    mr: MetaIndex = .{},
+
+    itemsBlockOffset: u64 = 0,
+    lensBlockOffset: u64 = 0,
+
+    sb: StorageBlock = .{},
+    unpackedIndexBlockBuf: std.ArrayList(u8) = .empty,
+
     fn initFromMemTable(memTable: *MemTable) BlockWriter {
         return .{
             .dataBuf = &memTable.dataBuf,
@@ -663,6 +701,48 @@ const BlockWriter = struct {
             .indexBuf = &memTable.indexBuf,
             .metaindexBuf = &memTable.metaindexBuf,
         };
+    }
+
+    fn writeBlock(self: *BlockWriter, alloc: Allocator, block: *MemBlock) !void {
+        const encoded = try block.encode(alloc, &self.sb);
+        self.bh.firstItem = encoded.firstItem;
+        self.bh.prefix = encoded.prefix;
+        self.bh.itemsCount = encoded.itemsCount;
+        self.bh.encodingType = encoded.encodingType;
+
+        // Write data
+        try self.dataBuf.appendSlice(alloc, self.sb.itemsData.items);
+        self.bh.itemsBlockSize = @intCast(self.sb.itemsData.items.len);
+        self.bh.itemsBlockOffset = self.itemsBlockOffset;
+        self.itemsBlockOffset += self.bh.itemsBlockSize;
+
+        // Write lens
+        try self.lensBuf.appendSlice(alloc, self.sb.lensData.items);
+        self.bh.lensBlockSize = @intCast(self.sb.lensData.items.len);
+        self.bh.lensBlockOffset = self.lensBlockOffset;
+        self.lensBlockOffset += self.bh.lensBlockSize;
+
+        // Write block header
+        const bhEncodeBound = self.bh.bound();
+        if (self.unpackedIndexBlockBuf.items.len + bhEncodeBound > maxIndexBlockSize) {
+            try self.flushIndexData(alloc);
+        }
+        try self.unpackedIndexBlockBuf.ensureUnusedCapacity(alloc, bhEncodeBound);
+        self.bh.encode(self.unpackedIndexBlockBuf.unusedCapacitySlice());
+        self.unpackedIndexBlockBuf.items.len += bhEncodeBound;
+
+        // Write block header
+        if (self.mr.firstItem.len == 0) {
+            self.mr.firstItem = self.bh.firstItem;
+        }
+        self.bh.reset();
+        self.mr.blockHeadersCount += 1;
+    }
+
+    fn flushIndexData(self: *BlockWriter, alloc: Allocator) !void {
+        _ = self;
+        _ = alloc;
+        unreachable;
     }
 
     fn close(self: *const BlockWriter) void {
@@ -721,7 +801,7 @@ const BlockMerger = struct {
     fn merge(
         self: *BlockMerger,
         alloc: Allocator,
-        writer: BlockWriter,
+        writer: *BlockWriter,
         tableHeader: *TableHeader,
         stopped: ?*std.atomic.Value(bool),
     ) !void {
@@ -784,7 +864,7 @@ const BlockMerger = struct {
     fn flush(
         self: *BlockMerger,
         alloc: Allocator,
-        writer: BlockWriter,
+        writer: *BlockWriter,
         tableHeader: *TableHeader,
     ) !void {
         const items = self.block.data.items;
@@ -807,13 +887,16 @@ const BlockMerger = struct {
         std.debug.assert(!std.mem.lessThan(u8, self.block.data.items[0], self.firstItem));
         std.debug.assert(std.mem.lessThan(u8, blockLastItem, self.lastItem) or
             std.mem.eql(u8, blockLastItem, self.lastItem));
+        if (builtin.is_test) {
+            std.debug.assert(std.sort.isSorted([]const u8, self.block.data.items, {}, MemOrder(u8).lessThanConst));
+        }
 
         tableHeader.itemsCount += self.block.data.items.len;
         if (tableHeader.firstItem.len == 0) {
             tableHeader.firstItem = self.block.data.items[0];
         }
         tableHeader.lastItem = blockLastItem;
-        self.writeBlock(alloc, writer, tableHeader);
+        try writer.writeBlock(alloc, self.block);
         self.block.reset();
     }
 
@@ -878,18 +961,5 @@ const BlockMerger = struct {
         }
 
         tagRecordsMerger.deinit(alloc);
-    }
-
-    fn writeBlock(
-        self: *const BlockMerger,
-        alloc: Allocator,
-        writer: BlockWriter,
-        tableHeader: *TableHeader,
-    ) void {
-        _ = self;
-        _ = alloc;
-        _ = writer;
-        _ = tableHeader;
-        unreachable;
     }
 };
