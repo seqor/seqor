@@ -38,7 +38,7 @@ pub fn init(allocator: std.mem.Allocator, table: *IndexTable) !*Self {
 pub fn hasStream(self: *Self, sid: SID) bool {
     _ = self;
     _ = sid;
-    unreachable;
+    std.debug.panic("not implemented", .{});
 }
 pub fn indexStream(self: *Self, alloc: Allocator, sid: SID, tags: []Field, encodedTags: []const u8) !void {
     var entries = try alloc.alloc([]const u8, 2 + tags.len);
