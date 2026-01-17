@@ -373,10 +373,10 @@ fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
 
 fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void {
     const tablesSize = (blocks.len + blocksInMemTable - 1) / blocksInMemTable;
-    var res = try std.ArrayList(*MemTable).initCapacity(alloc, tablesSize);
+    var memTables = try std.ArrayList(*MemTable).initCapacity(alloc, tablesSize);
     errdefer {
-        for (res.items) |memTable| memTable.deinit(alloc);
-        res.deinit(alloc);
+        for (memTables.items) |memTable| memTable.deinit(alloc);
+        memTables.deinit(alloc);
     }
 
     var tail = blocks[0..];
@@ -387,12 +387,25 @@ fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void 
         tail = tail[offset..];
 
         const memTable = try MemTable.init(alloc, head);
-        res.appendAssumeCapacity(memTable);
+        memTables.appendAssumeCapacity(memTable);
     }
 
     _ = self;
     _ = force;
-    unreachable;
+    // TODO: merge tables merfe adding them
+    // var n: usize = 0;
+    // var memTableSlice = memTables.items[n..];
+    // while (memTableSlice.len > 1) {
+    //     n = self.mergeMemTables(alloc, memTableSlice);
+    //     memTableSlice = memTableSlice[n..];
+    // }
+    // if (memTableSlice.len == 1) {
+    //     self.addToMemTables(alloc, memTableSlice[0], force);
+    // }
+
+    // for (memTables.items) |memTable| {
+    //     self.addToMemTables(alloc, memTable, force);
+    // }
 }
 
 const BlockHeader = struct {
@@ -466,16 +479,29 @@ const MetaIndex = struct {
     indexBlockOffset: u64 = 0,
     indexBlockSize: u32 = 0,
 
+    fn reset(self: *MetaIndex) void {
+        self.* = .{};
+    }
+
     // [firstItem.len:firstItem][4:count][8:offset][4:size] = firstItem.len + lenBound + 16
-    fn encode(self: *const MetaIndex, alloc: Allocator) ![]u8 {
+    pub fn bound(self: *const MetaIndex) usize {
         const firstItemBound = Encoder.varIntBound(self.firstItem.len);
-        const buf = try alloc.alloc(u8, firstItemBound + self.firstItem.len + 16);
+        return firstItemBound + self.firstItem.len + 16;
+    }
+
+    pub fn encode(self: *const MetaIndex, buf: []u8) void {
         var enc = Encoder.init(buf);
 
         enc.writeString(self.firstItem);
         enc.writeInt(u32, self.blockHeadersCount);
         enc.writeInt(u64, self.indexBlockOffset);
         enc.writeInt(u32, self.indexBlockSize);
+    }
+
+    fn encodeAlloc(self: *const MetaIndex, alloc: Allocator) ![]u8 {
+        const buf = try alloc.alloc(u8, self.bound());
+
+        self.encode(buf);
 
         return buf;
     }
@@ -567,8 +593,10 @@ const MemTable = struct {
         self.metaIndex.indexBlockOffset = 0;
         self.metaIndex.indexBlockSize = @intCast(n);
 
-        const encodedMetaIndex = try self.metaIndex.encode(alloc);
-        defer alloc.free(encodedMetaIndex);
+        var fbaFallback = std.heap.stackFallback(128, alloc);
+        var fba = fbaFallback.get();
+        const encodedMetaIndex = try self.metaIndex.encodeAlloc(fba);
+        defer fba.free(encodedMetaIndex);
 
         bound = try encoding.compressBound(encodedMetaIndex.len);
         const compressedMr = try alloc.alloc(u8, bound);
@@ -619,9 +647,10 @@ const MemTable = struct {
     ) !void {
         var merger = try BlockMerger.init(alloc, readers);
 
-        // TODO: perhaps easier making it return TableHeader value and assign to MemTable
+        // TODO: perhaps easier making it return TableHeader value and assign to MemTable,
+        // make sure there are no accumulations in the table header
         try merger.merge(alloc, writer, &self.tableHeader, stopped);
-        writer.close();
+        try writer.close(alloc);
     }
 };
 
@@ -692,7 +721,10 @@ const BlockWriter = struct {
     lensBlockOffset: u64 = 0,
 
     sb: StorageBlock = .{},
-    unpackedIndexBlockBuf: std.ArrayList(u8) = .empty,
+    uncompressedIndexBlockBuf: std.ArrayList(u8) = .empty,
+    uncompressedMetaindexBuf: std.ArrayList(u8) = .empty,
+
+    indexBlockOffset: u64 = 0,
 
     fn initFromMemTable(memTable: *MemTable) BlockWriter {
         return .{
@@ -724,12 +756,12 @@ const BlockWriter = struct {
 
         // Write block header
         const bhEncodeBound = self.bh.bound();
-        if (self.unpackedIndexBlockBuf.items.len + bhEncodeBound > maxIndexBlockSize) {
+        if (self.uncompressedIndexBlockBuf.items.len + bhEncodeBound > maxIndexBlockSize) {
             try self.flushIndexData(alloc);
         }
-        try self.unpackedIndexBlockBuf.ensureUnusedCapacity(alloc, bhEncodeBound);
-        self.bh.encode(self.unpackedIndexBlockBuf.unusedCapacitySlice());
-        self.unpackedIndexBlockBuf.items.len += bhEncodeBound;
+        try self.uncompressedIndexBlockBuf.ensureUnusedCapacity(alloc, bhEncodeBound);
+        self.bh.encode(self.uncompressedIndexBlockBuf.unusedCapacitySlice());
+        self.uncompressedIndexBlockBuf.items.len += bhEncodeBound;
 
         // Write block header
         if (self.mr.firstItem.len == 0) {
@@ -740,14 +772,44 @@ const BlockWriter = struct {
     }
 
     fn flushIndexData(self: *BlockWriter, alloc: Allocator) !void {
-        _ = self;
-        _ = alloc;
-        unreachable;
+        if (self.uncompressedIndexBlockBuf.items.len == 0) {
+            // Nothing to flush.
+            return;
+        }
+
+        // Write indexBlock
+        const bound = try encoding.compressBound(self.uncompressedIndexBlockBuf.items.len);
+        try self.indexBuf.ensureUnusedCapacity(alloc, bound);
+        const n = try encoding.compressAuto(
+            self.indexBuf.unusedCapacitySlice(),
+            self.uncompressedIndexBlockBuf.items,
+        );
+        self.indexBuf.items.len += n;
+
+        self.mr.indexBlockSize = @intCast(n);
+        self.mr.indexBlockOffset = self.indexBlockOffset;
+        self.indexBlockOffset += self.mr.indexBlockSize;
+        self.uncompressedIndexBlockBuf.clearRetainingCapacity();
+
+        // Write metaindex
+        const mrBound = self.mr.bound();
+        try self.uncompressedMetaindexBuf.ensureUnusedCapacity(alloc, mrBound);
+        self.mr.encode(self.uncompressedMetaindexBuf.unusedCapacitySlice());
+        self.uncompressedMetaindexBuf.items.len += mrBound;
+
+        self.mr.reset();
     }
 
-    fn close(self: *const BlockWriter) void {
-        _ = self;
-        unreachable;
+    fn close(self: *BlockWriter, alloc: Allocator) !void {
+        try self.flushIndexData(alloc);
+
+        const bound = try encoding.compressBound(self.uncompressedMetaindexBuf.items.len);
+        try self.metaindexBuf.ensureUnusedCapacity(alloc, bound);
+        const n = try encoding.compressAuto(
+            self.metaindexBuf.unusedCapacitySlice(),
+            self.uncompressedMetaindexBuf.items,
+        );
+        self.metaindexBuf.items.len += n;
     }
 };
 
