@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
 
-const maxTenantIDLen = @import("store/lines.zig").maxTenantIDLen;
+const maxTenantIDLen = @import("../lines.zig").maxTenantIDLen;
 
 const TagRecordsParseState = @import("TagRecordsParseState.zig");
 

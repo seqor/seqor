@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const MemOrder = @import("stds/sort.zig").MemOrder;
+const MemOrder = @import("../../stds/sort.zig").MemOrder;
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
 

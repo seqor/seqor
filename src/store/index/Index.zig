@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const SID = @import("store/lines.zig").SID;
-const Field = @import("store/lines.zig").Field;
+const SID = @import("../lines.zig").SID;
+const Field = @import("../lines.zig").Field;
 const IndexTable = @import("IndexTable.zig");
 
 const Encoder = @import("encoding").Encoder;

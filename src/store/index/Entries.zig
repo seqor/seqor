@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const getConf = @import("conf.zig").getConf;
+const getConf = @import("../../conf.zig").getConf;
 
 const MemBlock = @import("MemBlock.zig");
 

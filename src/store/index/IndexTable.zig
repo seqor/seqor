@@ -2,13 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const Heap = @import("stds/Heap.zig").Heap;
-const MemOrder = @import("stds/sort.zig").MemOrder;
+const Heap = @import("../../stds/Heap.zig").Heap;
+const MemOrder = @import("../../stds/sort.zig").MemOrder;
 
 const encoding = @import("encoding");
 const Encoder = encoding.Encoder;
 
-const fs = @import("fs.zig");
+const fs = @import("../../fs.zig");
 
 const IndexKind = @import("Index.zig").IndexKind;
 

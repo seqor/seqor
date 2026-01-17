@@ -7,8 +7,8 @@ const Decoder = encoding.Decoder;
 
 const IndexKind = @import("Index.zig").IndexKind;
 
-const maxTenantIDLen = @import("store/lines.zig").maxTenantIDLen;
-const Field = @import("store/lines.zig").Field;
+const maxTenantIDLen = @import("../lines.zig").maxTenantIDLen;
+const Field = @import("../lines.zig").Field;
 
 const Self = @This();
 
