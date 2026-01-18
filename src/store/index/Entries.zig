@@ -67,3 +67,26 @@ pub fn deinit(self: *Entries, alloc: Allocator) void {
     alloc.free(self.shards);
     alloc.destroy(self);
 }
+
+const testing = std.testing;
+
+test "Entries.shardIdxOverflow" {
+    const Conf = @import("../../conf.zig").Conf;
+    _ = Conf.default();
+
+    const alloc = testing.allocator;
+    const e = try Entries.init(alloc);
+    defer e.deinit(alloc);
+    e.shardIdx = .init(std.math.maxInt(usize));
+    try std.testing.expectEqual(e.shardIdx.load(.acquire), std.math.maxInt(usize));
+
+    _ = e.next();
+    try std.testing.expectEqual(e.shardIdx.load(.acquire), 0);
+
+    // it fetches the value first, then increments,
+    // therefore on it returns zero's shard and has value 1
+    const shard = e.next();
+    const firstShard = &e.shards[0];
+    try std.testing.expectEqual(e.shardIdx.load(.acquire), 1);
+    try std.testing.expectEqual(shard, firstShard);
+}
