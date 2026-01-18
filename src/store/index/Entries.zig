@@ -14,10 +14,8 @@ const EntriesShard = struct {
         self.mx.lock();
         defer self.mx.unlock();
 
-        // TODO: throttle max block per entries shard
-
         if (self.blocks.items.len == 0) {
-            const b = try alloc.create(MemBlock);
+            const b = try MemBlock.init(alloc);
             try self.blocks.append(alloc, b);
             self.flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
         }
@@ -27,12 +25,21 @@ const EntriesShard = struct {
         for (entries) |entry| {
             if (try block.add(alloc, entry)) continue;
 
-            block = try alloc.create(MemBlock);
+            // TODO: throttle max blocks per entries shard,
+            // instead of creating new block it has to return the unprocessed entries
+            block = try MemBlock.init(alloc);
+
             if (try block.add(alloc, entry)) {
                 try self.blocks.append(alloc, block);
+                continue;
             }
 
-            // TODO: handle too large entries, log an error
+            // Skip too long item,
+            var logPrefix = entry;
+            if (logPrefix.len > 32) {
+                logPrefix = logPrefix[0..32];
+            }
+            std.debug.print("skip adding item to index, must not exceed {d} bytes, given={d}, value={s}\n", .{ MemBlock.maxMemBlockSize, entry.len, logPrefix });
         }
 
         return self.blocks.items;

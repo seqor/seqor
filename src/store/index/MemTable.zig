@@ -123,38 +123,25 @@ fn mergeIntoMemTable(
     var outItemsCount: u64 = 0;
     for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
 
-    // TODO: init it inside mergeBlocks
-    var blockWriter = BlockWriter.initFromMemTable(self);
-    try self.mergeTables(alloc, "", &blockWriter, readers);
-}
-
-// FIXME: make it just mergeBlocks
-fn mergeTables(
-    self: *MemTable,
-    alloc: Allocator,
-    tablePath: []const u8,
-    writer: *BlockWriter,
-    readers: *std.ArrayList(*BlockReader),
-) !void {
-    try self.mergeBlocks(alloc, writer, readers, null);
-    if (tablePath.len != 0) {
-        var fbaFallback = std.heap.stackFallback(512, alloc);
-        const fba = fbaFallback.get();
-        try self.tableHeader.writeMeta(fba, tablePath);
-    }
+    try self.mergeBlocks(alloc, "", readers, null);
 }
 
 fn mergeBlocks(
     self: *MemTable,
     alloc: Allocator,
-    writer: *BlockWriter,
+    tablePath: []const u8,
     readers: *std.ArrayList(*BlockReader),
     stopped: ?*std.atomic.Value(bool),
 ) !void {
+    var writer = BlockWriter.initFromMemTable(self);
     var merger = try BlockMerger.init(alloc, readers);
 
-    // TODO: perhaps easier making it return TableHeader value and assign to MemTable,
-    // make sure there are no accumulations in the table header
-    try merger.merge(alloc, writer, &self.tableHeader, stopped);
+    self.tableHeader = try merger.merge(alloc, &writer, stopped);
     try writer.close(alloc);
+
+    if (tablePath.len != 0) {
+        var fbaFallback = std.heap.stackFallback(512, alloc);
+        const fba = fbaFallback.get();
+        try self.tableHeader.writeMeta(fba, tablePath);
+    }
 }

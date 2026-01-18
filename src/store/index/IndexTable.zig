@@ -18,6 +18,7 @@ entries: *Entries,
 blocks: std.ArrayList(*MemBlock) = .empty,
 mxBlocks: std.Thread.Mutex = .{},
 flushAtUs: ?i64 = null,
+blocksThresholdToFlush: u32,
 
 pub fn init(alloc: Allocator, flushInterval: u64) !*Self {
     const entries = try Entries.init(alloc);
@@ -27,18 +28,22 @@ pub fn init(alloc: Allocator, flushInterval: u64) !*Self {
     t.* = .{
         .flushInterval = flushInterval,
         .entries = entries,
+        .blocksThresholdToFlush = @intCast(entries.shards.len * maxBlocksPerShard),
     };
     return t;
 }
 
 pub fn add(self: *Self, alloc: Allocator, entries: [][]const u8) !void {
     const shard = self.entries.next();
+    // TODO: handle a case when a shard block doesn't fit more entries
     const blocks = try shard.add(alloc, entries);
     if (blocks.len == 0) return;
     try self.flushBlocks(alloc, blocks);
 }
 
 fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
+    if (blocks.len == 0) return;
+
     self.mxBlocks.lock();
     defer self.mxBlocks.unlock();
 
@@ -47,7 +52,7 @@ fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
     }
 
     try self.blocks.appendSlice(alloc, blocks);
-    if (self.blocks.items.len >= maxBlocksPerShard * self.entries.shards.len) {
+    if (self.blocks.items.len >= self.blocksThresholdToFlush) {
         try self.flush(alloc, self.blocks.items, false);
         self.blocks.clearRetainingCapacity();
     }

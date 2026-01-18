@@ -22,17 +22,23 @@ block: *MemBlock,
 firstItem: []const u8 = &[_]u8{},
 lastItem: []const u8 = &[_]u8{},
 
+/// init creates a BlockMerger instance from the readers
+/// be aware it mutates readers list inside
 pub fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerger {
     // TODO: collect metrics and experiment with flat array on 1-3 elements
 
     // TODO: experiment with Loser tree intead of heap:
     // https://grafana.com/blog/the-loser-tree-data-structure-how-to-optimize-merges-and-make-your-programs-run-faster/
 
-    for (readers.items) |reader| {
-        const next = try reader.next();
-        // TODO: identify if a read block may come here,
-        // either skip this validation or create another readers array
-        std.debug.assert(next);
+    var i: usize = 0;
+    while (i < readers.items.len) {
+        const reader = readers.items[i];
+        const hasNext = try reader.next();
+        if (!hasNext) {
+            _ = readers.swapRemove(i);
+            continue;
+        }
+        i += 1;
     }
 
     var heap = Heap(*BlockReader, BlockReader.blockReaderLessThan).init(alloc, readers);
@@ -48,13 +54,13 @@ pub fn merge(
     self: *BlockMerger,
     alloc: Allocator,
     writer: *BlockWriter,
-    tableHeader: *TableHeader,
     stopped: ?*std.atomic.Value(bool),
-) !void {
+) !TableHeader {
+    var tableHeader = TableHeader.init();
     while (true) {
         if (self.heap.len() == 0) {
-            try self.flush(alloc, writer, tableHeader);
-            return;
+            try self.flush(alloc, writer, &tableHeader);
+            return tableHeader;
         }
 
         if (stopped) |s| {
@@ -68,7 +74,7 @@ pub fn merge(
         var hasNextItem = false;
 
         if (self.heap.len() > 1) {
-            const nReader = self.nextReader();
+            const nReader = self.heap.peekNext().?;
             nextItem = nReader.current();
             hasNextItem = true;
         }
@@ -77,17 +83,17 @@ pub fn merge(
         var compareEveryItem = true;
         if (reader.currentI < items.len) {
             const lastItem = items[items.len - 1];
-            compareEveryItem = hasNextItem and std.mem.lessThan(u8, nextItem, lastItem);
+            compareEveryItem = hasNextItem and (std.mem.order(u8, lastItem, nextItem) == .gt);
         }
 
         while (reader.currentI < items.len) {
             const item = reader.current();
-            if (compareEveryItem and std.mem.lessThan(u8, nextItem, item)) {
+            if (compareEveryItem and (std.mem.order(u8, item, nextItem) == .gt)) {
                 break;
             }
 
             if (!try self.block.add(alloc, item)) {
-                try self.flush(alloc, writer, tableHeader);
+                try self.flush(alloc, writer, &tableHeader);
                 continue;
             }
             reader.currentI += 1;
@@ -105,25 +111,6 @@ pub fn merge(
 
         self.heap.fix(0);
     }
-}
-
-fn nextReader(self: *BlockMerger) *BlockReader {
-    // TODO: test just  return self.heap.peekNext().?;
-
-    const len = self.heap.len();
-
-    if (len < 3) {
-        return self.heap.array.items[1];
-    }
-
-    const one = self.heap.array.items[1];
-    const another = self.heap.array.items[2];
-    const oneItem = one.current();
-    const anotherItem = another.current();
-    if (std.mem.lessThan(u8, oneItem, anotherItem)) {
-        return one;
-    }
-    return another;
 }
 
 fn flush(
@@ -150,8 +137,7 @@ fn flush(
 
     // TODO: move this validation to tests and test the block is sorted
     std.debug.assert(!std.mem.lessThan(u8, self.block.data.items[0], self.firstItem));
-    std.debug.assert(std.mem.lessThan(u8, blockLastItem, self.lastItem) or
-        std.mem.eql(u8, blockLastItem, self.lastItem));
+    std.debug.assert(std.mem.order(u8, self.lastItem, blockLastItem) == .gt);
     if (builtin.is_test) {
         std.debug.assert(std.sort.isSorted([]const u8, self.block.data.items, {}, MemOrder(u8).lessThanConst));
     }

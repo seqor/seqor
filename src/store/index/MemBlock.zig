@@ -18,7 +18,7 @@ const EncodedMemBlock = struct {
 
 // TODO: make it configurable,
 // depending on used CPU model must be changed according its L1 cache size
-const maxMemBlockSize = 32 * 1024;
+pub const maxMemBlockSize = 32 * 1024;
 
 fn findPrefix(first: []const u8, second: []const u8) []const u8 {
     const n = @min(first.len, second.len);
@@ -32,6 +32,19 @@ const MemBlock = @This();
 data: std.ArrayList([]const u8),
 size: u32,
 prefix: []const u8,
+
+pub fn init(alloc: Allocator) !*MemBlock {
+    var data = try std.ArrayList([]const u8).initCapacity(alloc, maxMemBlockSize);
+    errdefer data.deinit(alloc);
+
+    const b = try alloc.create(MemBlock);
+    b.* = .{
+        .data = data,
+        .size = 0,
+        .prefix = undefined,
+    };
+    return b;
+}
 
 pub fn deinit(self: *MemBlock, alloc: Allocator) void {
     self.data.deinit(alloc);

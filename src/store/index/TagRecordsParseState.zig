@@ -34,8 +34,8 @@ pub fn setup(self: *Self, item: []const u8) !void {
 
     // We need to modify the buffer in-place for unescaping
     // This is safe because we're only unescaping (making it shorter)
-    const tag_portion = @constCast(item[tenantOffset..]);
-    const offset = self.tag.decodeIndexTag(tag_portion);
+    const tagPortion = @constCast(item[tenantOffset..]);
+    const offset = self.tag.decodeIndexTag(tagPortion);
 
     self.streamsRaw = item[tenantOffset + offset ..];
 }
