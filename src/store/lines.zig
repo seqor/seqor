@@ -39,6 +39,23 @@ pub const SID = struct {
             .id = id,
         };
     }
+
+    pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) SID {
+        const tenantID = try allocator.alloc(u8, maxTenantIDLen);
+
+        var decoder = Decoder.init(buf);
+        decoder.readPaddedToBuf(maxTenantIDLen, tenantID);
+        const id = decoder.readInt(u128);
+        return .{
+            .tenantID = tenantID,
+            .id = id,
+        };
+    }
+
+    pub fn deinit(self: *SID, allocator: std.mem.Allocator) void {
+        allocator.free(self.tenantID);
+        self.* = undefined;
+    }
 };
 
 const ControlChar = enum(u8) {
