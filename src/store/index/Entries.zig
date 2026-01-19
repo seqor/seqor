@@ -10,7 +10,9 @@ const EntriesShard = struct {
     blocks: std.ArrayList(*MemBlock),
     flushAtUs: i64,
 
-    pub fn add(self: *EntriesShard, alloc: Allocator, entries: [][]const u8) ![]*MemBlock {
+    // TODO: init blocks with maxBlocks capacity
+
+    pub fn add(self: *EntriesShard, alloc: Allocator, entries: [][]const u8) !?std.ArrayList(*MemBlock) {
         self.mx.lock();
         defer self.mx.unlock();
 
@@ -39,12 +41,28 @@ const EntriesShard = struct {
             if (logPrefix.len > 32) {
                 logPrefix = logPrefix[0..32];
             }
-            std.debug.print("skip adding item to index, must not exceed {d} bytes, given={d}, value={s}\n", .{ MemBlock.maxMemBlockSize, entry.len, logPrefix });
+            std.debug.print(
+                "skip adding item to index, must not exceed {d} bytes, given={d}, value={s}\n",
+                .{ MemBlock.maxMemBlockSize, entry.len, logPrefix },
+            );
         }
 
-        return self.blocks.items;
+        if (self.blocks.items.len >= maxBlocksPerShard) {
+            // TODO: test if its worth returning the origin array instead of the copy
+            // so the caller could clear its capacity having no need to allocate one more same array
+            // OR preallocate a pool of such arrays in a single segment
+            const blocksToFlush = self.blocks;
+            const freshBlocks = try std.ArrayList(*MemBlock).initCapacity(alloc, maxBlocksPerShard);
+
+            self.blocks = freshBlocks;
+            return blocksToFlush;
+        }
+
+        return null;
     }
 };
+
+pub const maxBlocksPerShard = 256;
 
 const Entries = @This();
 

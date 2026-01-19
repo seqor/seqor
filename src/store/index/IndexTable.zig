@@ -15,7 +15,7 @@ const Self = @This();
 flushInterval: u64,
 entries: *Entries,
 
-blocks: std.ArrayList(*MemBlock) = .empty,
+blocksToFlush: std.ArrayList(*MemBlock),
 mxBlocks: std.Thread.Mutex = .{},
 flushAtUs: ?i64 = null,
 blocksThresholdToFlush: u32,
@@ -24,21 +24,30 @@ pub fn init(alloc: Allocator, flushInterval: u64) !*Self {
     const entries = try Entries.init(alloc);
     errdefer entries.deinit(alloc);
 
+    const blocksThresholdToFlush: u32 = @intCast(entries.shards.len * maxBlocksPerShard);
+
+    // TODO: try using list of lists instead in order not to copy data from blocks to blocksToFlush
+    var blocksToFlush = try std.ArrayList(*MemBlock).initCapacity(alloc, blocksThresholdToFlush);
+    errdefer blocksToFlush.deinit(alloc);
+
     const t = try alloc.create(Self);
     t.* = .{
         .flushInterval = flushInterval,
         .entries = entries,
         .blocksThresholdToFlush = @intCast(entries.shards.len * maxBlocksPerShard),
+        .blocksToFlush = blocksToFlush,
     };
     return t;
 }
 
 pub fn add(self: *Self, alloc: Allocator, entries: [][]const u8) !void {
     const shard = self.entries.next();
-    // TODO: handle a case when a shard block doesn't fit more entries
-    const blocks = try shard.add(alloc, entries);
-    if (blocks.len == 0) return;
-    try self.flushBlocks(alloc, blocks);
+    const blocksList = try shard.add(alloc, entries);
+    if (blocksList == null) return;
+
+    var blocks = blocksList.?;
+    defer blocks.deinit(alloc);
+    try self.flushBlocks(alloc, blocks.items);
 }
 
 fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
@@ -47,18 +56,18 @@ fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
     self.mxBlocks.lock();
     defer self.mxBlocks.unlock();
 
-    if (self.blocks.items.len == 0) {
+    if (self.blocksToFlush.items.len == 0) {
         self.flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
     }
 
-    try self.blocks.appendSlice(alloc, blocks);
-    if (self.blocks.items.len >= self.blocksThresholdToFlush) {
-        try self.flush(alloc, self.blocks.items, false);
-        self.blocks.clearRetainingCapacity();
+    try self.blocksToFlush.appendSlice(alloc, blocks);
+    if (self.blocksToFlush.items.len >= self.blocksThresholdToFlush) {
+        try self.flushBlocksToMemTables(alloc, self.blocksToFlush.items, false);
+        self.blocksToFlush.clearRetainingCapacity();
     }
 }
 
-fn flush(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void {
+fn flushBlocksToMemTables(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void {
     const tablesSize = (blocks.len + blocksInMemTable - 1) / blocksInMemTable;
     var memTables = try std.ArrayList(*MemTable).initCapacity(alloc, tablesSize);
     errdefer {
