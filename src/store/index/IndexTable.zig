@@ -88,7 +88,8 @@ fn flushBlocksToMemTables(self: *Self, alloc: Allocator, blocks: []*MemBlock, fo
 
     _ = self;
     _ = force;
-    // TODO: merge tables merfe adding them
+    unreachable;
+    // TODO: merge tables
     // var n: usize = 0;
     // var memTableSlice = memTables.items[n..];
     // while (memTableSlice.len > 1) {
