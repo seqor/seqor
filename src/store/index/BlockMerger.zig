@@ -56,7 +56,7 @@ pub fn merge(
     writer: *BlockWriter,
     stopped: ?*std.atomic.Value(bool),
 ) !TableHeader {
-    var tableHeader = TableHeader.init();
+    var tableHeader = TableHeader{};
     while (true) {
         if (self.heap.len() == 0) {
             try self.flush(alloc, writer, &tableHeader);

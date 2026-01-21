@@ -7,19 +7,10 @@ const filenameMeta = "metadata.json";
 
 const TableHeader = @This();
 
-itemsCount: u64,
-blocksCount: u64,
-firstItem: []const u8,
-lastItem: []const u8,
-
-pub fn init() TableHeader {
-    return .{
-        .itemsCount = 0,
-        .blocksCount = 0,
-        .firstItem = undefined,
-        .lastItem = undefined,
-    };
-}
+itemsCount: u64 = 0,
+blocksCount: u64 = 0,
+firstItem: []const u8 = undefined,
+lastItem: []const u8 = undefined,
 
 pub fn writeMeta(self: *const TableHeader, alloc: Allocator, tablePath: []const u8) !void {
     const json = try std.json.Stringify.valueAlloc(alloc, .{
