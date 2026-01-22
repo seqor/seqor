@@ -39,6 +39,12 @@ pub fn initFromMemTable(memTable: *MemTable) BlockWriter {
     };
 }
 
+pub fn deinit(self: *BlockWriter, alloc: Allocator) void {
+    self.sb.deinit(alloc);
+    self.uncompressedIndexBlockBuf.deinit(alloc);
+    self.uncompressedMetaindexBuf.deinit(alloc);
+}
+
 pub fn writeBlock(self: *BlockWriter, alloc: Allocator, block: *MemBlock) !void {
     const encoded = try block.encode(alloc, &self.sb);
     self.bh.firstItem = encoded.firstItem;
