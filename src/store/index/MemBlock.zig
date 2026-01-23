@@ -33,6 +33,9 @@ data: std.ArrayList([]const u8),
 size: u32,
 prefix: []const u8,
 
+// stateBuffer is used for ownership of new record items during the merging,
+stateBuffer: ?std.ArrayList(u8) = null,
+
 pub fn init(alloc: Allocator) !*MemBlock {
     var data = try std.ArrayList([]const u8).initCapacity(alloc, maxMemBlockSize);
     errdefer data.deinit(alloc);
@@ -48,6 +51,7 @@ pub fn init(alloc: Allocator) !*MemBlock {
 
 pub fn deinit(self: *MemBlock, alloc: Allocator) void {
     self.data.deinit(alloc);
+    if (self.stateBuffer) |*buf| buf.deinit(alloc);
     alloc.destroy(self);
 }
 
@@ -193,9 +197,9 @@ pub fn encode(
     enc = Encoder.init(encodedLens);
     enc.writeVarInts(u32, lens.items);
 
-    sb.lensData = try std.ArrayList(u8).initCapacity(alloc, encodedPrefixLensBuf.len + encodedLens.len);
-    sb.lensData.appendSliceAssumeCapacity(encodedPrefixLensBuf);
     bound = try encoding.compressBound(encodedLens.len);
+    sb.lensData = try std.ArrayList(u8).initCapacity(alloc, encodedPrefixLensBuf.len + bound);
+    sb.lensData.appendSliceAssumeCapacity(encodedPrefixLensBuf);
     const compressedLens = try alloc.alloc(u8, bound);
     defer alloc.free(compressedLens);
     n = try encoding.compressAuto(compressedLens, encodedLens);
@@ -217,8 +221,8 @@ pub fn encode(
     }
 
     return EncodedMemBlock{
-        .firstItem = try alloc.dupe(u8, firstItem),
-        .prefix = try alloc.dupe(u8, self.prefix),
+        .firstItem = firstItem,
+        .prefix = self.prefix,
         .itemsCount = @intCast(self.data.items.len),
         .encodingType = .zstd,
     };

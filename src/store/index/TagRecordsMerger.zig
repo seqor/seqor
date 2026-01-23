@@ -32,7 +32,7 @@ pub fn deinit(self: *Self, alloc: Allocator) void {
     self.prevState.deinit(alloc);
 }
 
-pub fn writeState(self: *Self, alloc: Allocator, data: *std.ArrayList([]const u8)) !void {
+pub fn writeState(self: *Self, alloc: Allocator, buf: *std.ArrayList(u8), target: *std.ArrayList([]const u8)) !void {
     if (self.streamIDs.items.len == 0) {
         return;
     }
@@ -41,15 +41,18 @@ pub fn writeState(self: *Self, alloc: Allocator, data: *std.ArrayList([]const u8
     self.removeDuplicatedStreams();
 
     const encodePrefixBound = self.prevState.encodePrefixBound();
-    const buf = try alloc.alloc(u8, encodePrefixBound + self.streamIDs.items.len * maxTenantIDLen);
-    self.prevState.encodePrefix(buf);
-    var enc = Encoder.init(buf[encodePrefixBound..]);
+    const bound = encodePrefixBound + self.streamIDs.items.len * maxTenantIDLen;
+    try buf.ensureUnusedCapacity(alloc, bound);
+    const slice = buf.unusedCapacitySlice();
+    self.prevState.encodePrefix(slice);
+    var enc = Encoder.init(slice[encodePrefixBound..]);
     for (self.streamIDs.items) |sid| {
         enc.writeInt(u128, sid);
     }
+    buf.items.len += bound;
 
-    try data.append(alloc, buf);
     self.streamIDs.clearRetainingCapacity();
+    try target.append(alloc, slice[0..bound]);
 }
 
 fn removeDuplicatedStreams(self: *Self) void {

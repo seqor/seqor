@@ -19,7 +19,7 @@ indexBuf: *std.ArrayList(u8),
 metaindexBuf: *std.ArrayList(u8),
 
 bh: BlockHeader = .{ .firstItem = undefined, .prefix = undefined, .encodingType = undefined },
-mr: MetaIndex = .{},
+mi: MetaIndex = .{},
 
 itemsBlockOffset: u64 = 0,
 lensBlockOffset: u64 = 0,
@@ -74,11 +74,11 @@ pub fn writeBlock(self: *BlockWriter, alloc: Allocator, block: *MemBlock) !void 
     self.uncompressedIndexBlockBuf.items.len += bhEncodeBound;
 
     // Write block header
-    if (self.mr.firstItem.len == 0) {
-        self.mr.firstItem = self.bh.firstItem;
+    if (self.mi.firstItem.len == 0) {
+        self.mi.firstItem = self.bh.firstItem;
     }
     self.bh.reset();
-    self.mr.blockHeadersCount += 1;
+    self.mi.blockHeadersCount += 1;
 }
 
 pub fn close(self: *BlockWriter, alloc: Allocator) !void {
@@ -108,16 +108,16 @@ fn flushIndexData(self: *BlockWriter, alloc: Allocator) !void {
     );
     self.indexBuf.items.len += n;
 
-    self.mr.indexBlockSize = @intCast(n);
-    self.mr.indexBlockOffset = self.indexBlockOffset;
-    self.indexBlockOffset += self.mr.indexBlockSize;
+    self.mi.indexBlockSize = @intCast(n);
+    self.mi.indexBlockOffset = self.indexBlockOffset;
+    self.indexBlockOffset += self.mi.indexBlockSize;
     self.uncompressedIndexBlockBuf.clearRetainingCapacity();
 
     // Write metaindex
-    const mrBound = self.mr.bound();
+    const mrBound = self.mi.bound();
     try self.uncompressedMetaindexBuf.ensureUnusedCapacity(alloc, mrBound);
-    self.mr.encode(self.uncompressedMetaindexBuf.unusedCapacitySlice());
+    self.mi.encode(self.uncompressedMetaindexBuf.unusedCapacitySlice());
     self.uncompressedMetaindexBuf.items.len += mrBound;
 
-    self.mr.reset();
+    self.mi.reset();
 }

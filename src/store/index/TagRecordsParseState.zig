@@ -23,6 +23,7 @@ pub fn init(alloc: Allocator) !*Self {
     return s;
 }
 pub fn deinit(self: *Self, alloc: Allocator) void {
+    self.streamIDs.deinit(alloc);
     alloc.destroy(self);
 }
 pub fn setup(self: *Self, item: []const u8) !void {

@@ -43,15 +43,12 @@ pub fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerge
         i += 1;
     }
 
-    var block = try MemBlock.init(alloc);
-    errdefer block.deinit(alloc);
-
     var heap = Heap(*BlockReader, BlockReader.blockReaderLessThan).init(alloc, readers);
     heap.heapify();
 
     return .{
         .heap = heap,
-        .block = block,
+        .block = try MemBlock.init(alloc),
     };
 }
 
@@ -148,7 +145,7 @@ fn flush(
 
     // TODO: move this validation to tests and test the block is sorted
     std.debug.assert(std.mem.order(u8, self.block.data.items[0], self.firstItem) != .lt);
-    std.debug.assert(std.mem.order(u8, self.lastItem, blockLastItem) != .gt);
+    std.debug.assert(std.mem.order(u8, blockLastItem, self.lastItem) != .gt);
     if (builtin.is_test) {
         std.debug.assert(std.sort.isSorted([]const u8, self.block.data.items, {}, MemOrder(u8).lessThanConst));
     }
@@ -180,36 +177,49 @@ fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
         return;
     }
 
-    // TODO: review concurrent writing model to make sure it actually can happen
+    // TODO: review concurrent writing model whether it's possible to optimize further
+    // and avoid block copy
     var blockCopy = try std.ArrayList([]const u8).initCapacity(alloc, items.len);
     defer blockCopy.deinit(alloc);
     blockCopy.appendSliceAssumeCapacity(items);
     // can start mutating the original array after copying
     self.block.data.clearRetainingCapacity();
+    // TODO: tune the capacity to more practical amount
+    if (self.block.stateBuffer == null) {
+        self.block.stateBuffer = try .initCapacity(alloc, 2048);
+    } else {
+        // TODO: validate whether its possible
+        self.block.stateBuffer.?.clearRetainingCapacity();
+    }
+    const stateBuf = &self.block.stateBuffer.?;
 
     var tagRecordsMerger = try TagRecordsMerger.init(alloc);
+    defer tagRecordsMerger.deinit(alloc);
 
-    for (0..items.len) |i| {
+    // use block copy because we override block itself from the beginning
+    for (0..blockCopy.items.len) |i| {
         if (items[i].len == 0 or items[i][0] != @intFromEnum(IndexKind.tagToSids) or i == 0 or i == items.len - 1) {
-            try tagRecordsMerger.writeState(alloc, &self.block.data);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
+            try self.block.data.append(alloc, items[i]);
             continue;
         }
 
         try tagRecordsMerger.state.setup(items[i]);
         if (tagRecordsMerger.state.streamsLen() > maxStreamsPerRecord) {
-            try tagRecordsMerger.writeState(alloc, &self.block.data);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
+            try self.block.data.append(alloc, items[i]);
             continue;
         }
 
         if (!tagRecordsMerger.statesPrefixEqual()) {
-            try tagRecordsMerger.writeState(alloc, &self.block.data);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
         }
 
         try tagRecordsMerger.state.parseStreamIDs(alloc);
         try tagRecordsMerger.moveParsedState(alloc);
 
         if (tagRecordsMerger.streamIDs.items.len >= maxStreamsPerRecord) {
-            try tagRecordsMerger.writeState(alloc, &self.block.data);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
         }
     }
 
@@ -218,11 +228,11 @@ fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
     if (!isSorted) {
         // defend against parallel writing leaving the state unmerged,
         // fallback to the original data
+        self.block.stateBuffer.?.clearRetainingCapacity();
         self.block.data.clearRetainingCapacity();
+        try self.block.data.ensureUnusedCapacity(alloc, blockCopy.items.len);
         self.block.data.appendSliceAssumeCapacity(blockCopy.items);
     }
-
-    tagRecordsMerger.deinit(alloc);
 }
 
 // ============================================================================
@@ -421,8 +431,6 @@ test "BlockMerger.merge basic scenarios" {
 //
 //     var writer = BlockWriter.initFromMemTable(memTable);
 //     var merger = try BlockMerger.init(alloc, &readers);
-//     merger.block = try MemBlock.init(alloc);
-//     defer merger.block.deinit(alloc);
 //
 //     const tableHeader = try merger.merge(alloc, &writer, null);
 //
@@ -430,125 +438,147 @@ test "BlockMerger.merge basic scenarios" {
 //     try testing.expectEqual(@as(u64, @intCast(largeEntries.len)), tableHeader.itemsCount);
 // }
 
-// test "BlockMerger.merge tag records" {
-//     const alloc = testing.allocator;
-//
-//     // Test case 1: Single tag record (no merging)
-//     {
-//         const tag1 = Field{ .key = "env", .value = "prod" };
-//         const entry1 = try createTagRecord(alloc, "tenant1", tag1, &[_]u128{ 100, 200 });
-//         defer alloc.free(entry1);
-//
-//         const blocks = [_][]const []const u8{&.{entry1}};
-//
-//         var readers = try createTestReaders(alloc, &blocks);
-//         defer cleanupReaders(alloc, &readers);
-//
-//         var memTable = try createTestMemTable(alloc);
-//         defer memTable.deinit(alloc);
-//
-//         var writer = BlockWriter.initFromMemTable(memTable);
-//         var merger = try BlockMerger.init(alloc, &readers);
-//         merger.block = try MemBlock.init(alloc);
-//         defer merger.block.deinit(alloc);
-//
-//         const tableHeader = try merger.merge(alloc, &writer, null);
-//
-//         // Single tag record, no merging expected
-//         try testing.expectEqual(@as(u64, 1), tableHeader.itemsCount);
-//     }
-//
-//     // Test case 2: Two consecutive tag records, same prefix (should merge)
-//     {
-//         const tag2 = Field{ .key = "env", .value = "prod" };
-//         const entry1 = try createTagRecord(alloc, "tenant1", tag2, &[_]u128{100});
-//         defer alloc.free(entry1);
-//         const entry2 = try createTagRecord(alloc, "tenant1", tag2, &[_]u128{200});
-//         defer alloc.free(entry2);
-//
-//         // Add padding entries to avoid boundary conditions
-//         const sidEntry1 = try createSidEntry(alloc, "tenant0", 50);
-//         defer alloc.free(sidEntry1);
-//         const sidEntry2 = try createSidEntry(alloc, "tenant2", 300);
-//         defer alloc.free(sidEntry2);
-//
-//         const blocks = [_][]const []const u8{&.{ sidEntry1, entry1, entry2, sidEntry2 }};
-//
-//         var readers = try createTestReaders(alloc, &blocks);
-//         defer cleanupReaders(alloc, &readers);
-//
-//         var memTable = try createTestMemTable(alloc);
-//         defer memTable.deinit(alloc);
-//
-//         var writer = BlockWriter.initFromMemTable(memTable);
-//         var merger = try BlockMerger.init(alloc, &readers);
-//         merger.block = try MemBlock.init(alloc);
-//         defer merger.block.deinit(alloc);
-//
-//         const tableHeader = try merger.merge(alloc, &writer, null);
-//
-//         // Should have merged tag records: sidEntry1 + merged tag + sidEntry2 = 3
-//         try testing.expectEqual(@as(u64, 3), tableHeader.itemsCount);
-//     }
-//
-//     // Test case 3: Two consecutive tag records, different tenant (should NOT merge)
-//     {
-//         const tag3 = Field{ .key = "env", .value = "prod" };
-//         const entry1 = try createTagRecord(alloc, "tenant1", tag3, &[_]u128{100});
-//         defer alloc.free(entry1);
-//         const entry2 = try createTagRecord(alloc, "tenant2", tag3, &[_]u128{200});
-//         defer alloc.free(entry2);
-//
-//         const sidEntry1 = try createSidEntry(alloc, "tenant0", 50);
-//         defer alloc.free(sidEntry1);
-//         const sidEntry2 = try createSidEntry(alloc, "tenant3", 300);
-//         defer alloc.free(sidEntry2);
-//
-//         const blocks = [_][]const []const u8{&.{ sidEntry1, entry1, entry2, sidEntry2 }};
-//
-//         var readers = try createTestReaders(alloc, &blocks);
-//         defer cleanupReaders(alloc, &readers);
-//
-//         var memTable = try createTestMemTable(alloc);
-//         defer memTable.deinit(alloc);
-//
-//         var writer = BlockWriter.initFromMemTable(memTable);
-//         var merger = try BlockMerger.init(alloc, &readers);
-//         merger.block = try MemBlock.init(alloc);
-//         defer merger.block.deinit(alloc);
-//
-//         const tableHeader = try merger.merge(alloc, &writer, null);
-//
-//         // Should NOT merge (different tenants): 4 entries
-//         try testing.expectEqual(@as(u64, 4), tableHeader.itemsCount);
-//     }
-//
-//     // Test case 4: Mixed IndexKind entries
-//     {
-//         const tag4 = Field{ .key = "env", .value = "prod" };
-//         const tagEntry = try createTagRecord(alloc, "tenant1", tag4, &[_]u128{100});
-//         defer alloc.free(tagEntry);
-//         const sidEntry = try createSidEntry(alloc, "tenant1", 100);
-//         defer alloc.free(sidEntry);
-//
-//         const blocks = [_][]const []const u8{&.{ sidEntry, tagEntry }};
-//
-//         var readers = try createTestReaders(alloc, &blocks);
-//         defer cleanupReaders(alloc, &readers);
-//
-//         var memTable = try createTestMemTable(alloc);
-//         defer memTable.deinit(alloc);
-//
-//         var writer = BlockWriter.initFromMemTable(memTable);
-//         var merger = try BlockMerger.init(alloc, &readers);
-//         merger.block = try MemBlock.init(alloc);
-//         defer merger.block.deinit(alloc);
-//
-//         const tableHeader = try merger.merge(alloc, &writer, null);
-//
-//         try testing.expectEqual(@as(u64, 2), tableHeader.itemsCount);
-//     }
-// }
+test "BlockMerger.merge tag records" {
+    const alloc = testing.allocator;
+
+    // Test case 1: Single tag record (no merging)
+    {
+        const tag1 = Field{ .key = "env", .value = "prod" };
+        const entry1 = try createTagRecord(alloc, "tenant1", tag1, &[_]u128{ 100, 200 });
+        defer alloc.free(entry1);
+
+        const blocks = [_][]const []const u8{&.{entry1}};
+
+        var readers = try createTestReaders(alloc, &blocks);
+        defer cleanupReaders(alloc, &readers);
+
+        var memTable = try createTestMemTable(alloc);
+        defer memTable.deinit(alloc);
+
+        var writer = BlockWriter.initFromMemTable(memTable);
+        defer writer.deinit(alloc);
+
+        var merger = try BlockMerger.init(alloc, &readers);
+        defer merger.deinit(alloc);
+
+        const tableHeader = try merger.merge(alloc, &writer, null);
+
+        // Single tag record, no merging expected
+        try testing.expectEqual(@as(u64, 1), tableHeader.itemsCount);
+    }
+
+    // Test case 2: Two consecutive tag records, same prefix (should merge)
+    {
+        const tag2 = Field{ .key = "env", .value = "prod" };
+        const entry1 = try createTagRecord(alloc, "tenant1", tag2, &[_]u128{100});
+        defer alloc.free(entry1);
+        const entry2 = try createTagRecord(alloc, "tenant1", tag2, &[_]u128{200});
+        defer alloc.free(entry2);
+
+        // Need padding before and after tag records to avoid boundary conditions
+        // Create entries with kind > 2 (sidToTags = 1, tagToSids = 2, so use kind 3+)
+        // Actually, let's use sid entries and add a trailing tag entry
+        const sidEntry1 = try createSidEntry(alloc, "tenant0", 50);
+        defer alloc.free(sidEntry1);
+        const sidEntry2 = try createSidEntry(alloc, "tenant0a", 60);
+        defer alloc.free(sidEntry2);
+        const entry3 = try createTagRecord(alloc, "tenant2", tag2, &[_]u128{300});
+        defer alloc.free(entry3);
+
+        // Items sorted lexicographically: kind=0 < kind=2
+        // sidEntry1[0,tenant0] < sidEntry2[0,tenant0a] < entry1[2,tenant1] < entry2[2,tenant1] < entry3[2,tenant2]
+        const blocks = [_][]const []const u8{&.{ sidEntry1, sidEntry2, entry1, entry2, entry3 }};
+
+        var readers = try createTestReaders(alloc, &blocks);
+        defer cleanupReaders(alloc, &readers);
+
+        var memTable = try createTestMemTable(alloc);
+        defer memTable.deinit(alloc);
+
+        var writer = BlockWriter.initFromMemTable(memTable);
+        defer writer.deinit(alloc);
+
+        var merger = try BlockMerger.init(alloc, &readers);
+        defer merger.deinit(alloc);
+
+        const tableHeader = try merger.merge(alloc, &writer, null);
+
+        // sidEntry1 (first, preserved) + sidEntry2 + merged(entry1,entry2) + entry3 + entry3 (last, preserved)
+        // Wait, entry3 is last so preserved... let me recalculate:
+        // Position 0 (first): sidEntry1 - preserved
+        // Position 1: sidEntry2 - not tagToSids, appended as-is
+        // Position 2: entry1 - tagToSids, merged with entry2
+        // Position 3: entry2 - tagToSids, same prefix as entry1, merged
+        // Position 4 (last): entry3 - preserved
+        // Result: sidEntry1 + sidEntry2 + merged(entry1,entry2) + entry3 = 4
+        try testing.expectEqual(@as(u64, 4), tableHeader.itemsCount);
+    }
+
+    // Test case 3: Two consecutive tag records, different tenant (should NOT merge)
+    {
+        const tag3 = Field{ .key = "env", .value = "prod" };
+        const entry1 = try createTagRecord(alloc, "tenant1", tag3, &[_]u128{100});
+        defer alloc.free(entry1);
+        const entry2 = try createTagRecord(alloc, "tenant2", tag3, &[_]u128{200});
+        defer alloc.free(entry2);
+
+        const sidEntry1 = try createSidEntry(alloc, "tenant0", 50);
+        defer alloc.free(sidEntry1);
+        const sidEntry2 = try createSidEntry(alloc, "tenant0a", 60);
+        defer alloc.free(sidEntry2);
+        const entry3 = try createTagRecord(alloc, "tenant3", tag3, &[_]u128{300});
+        defer alloc.free(entry3);
+
+        // Items sorted lexicographically: kind byte comes first
+        // sidEntry1[0,tenant0] < sidEntry2[0,tenant0a] < entry1[2,tenant1] < entry2[2,tenant2] < entry3[2,tenant3]
+        const blocks = [_][]const []const u8{&.{ sidEntry1, sidEntry2, entry1, entry2, entry3 }};
+
+        var readers = try createTestReaders(alloc, &blocks);
+        defer cleanupReaders(alloc, &readers);
+
+        var memTable = try createTestMemTable(alloc);
+        defer memTable.deinit(alloc);
+
+        var writer = BlockWriter.initFromMemTable(memTable);
+        defer writer.deinit(alloc);
+
+        var merger = try BlockMerger.init(alloc, &readers);
+        defer merger.deinit(alloc);
+
+        const tableHeader = try merger.merge(alloc, &writer, null);
+
+        // Should NOT merge (different tenants):
+        // sidEntry1 (first, preserved) + sidEntry2 + entry1 + entry2 + entry3 (last, preserved) = 5
+        try testing.expectEqual(@as(u64, 5), tableHeader.itemsCount);
+    }
+
+    // Test case 4: Mixed IndexKind entries
+    {
+        const tag4 = Field{ .key = "env", .value = "prod" };
+        const tagEntry = try createTagRecord(alloc, "tenant1", tag4, &[_]u128{100});
+        defer alloc.free(tagEntry);
+        const sidEntry = try createSidEntry(alloc, "tenant1", 100);
+        defer alloc.free(sidEntry);
+
+        const blocks = [_][]const []const u8{&.{ sidEntry, tagEntry }};
+
+        var readers = try createTestReaders(alloc, &blocks);
+        defer cleanupReaders(alloc, &readers);
+
+        var memTable = try createTestMemTable(alloc);
+        defer memTable.deinit(alloc);
+
+        var writer = BlockWriter.initFromMemTable(memTable);
+        defer writer.deinit(alloc);
+
+        var merger = try BlockMerger.init(alloc, &readers);
+        defer merger.deinit(alloc);
+
+        const tableHeader = try merger.merge(alloc, &writer, null);
+
+        try testing.expectEqual(@as(u64, 2), tableHeader.itemsCount);
+    }
+}
 
 test "BlockMerger.merge stopped flag" {
     const alloc = testing.allocator;
