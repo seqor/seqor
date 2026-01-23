@@ -441,15 +441,127 @@ test "BlockMerger.merge basic scenarios" {
 test "BlockMerger.merge tag records" {
     const alloc = testing.allocator;
 
-    // Test case 1: Single tag record (no merging)
-    {
-        const tag1 = Field{ .key = "env", .value = "prod" };
-        const entry1 = try createTagRecord(alloc, "tenant1", tag1, &[_]u128{ 100, 200 });
-        defer alloc.free(entry1);
+    const tag = Field{ .key = "env", .value = "prod" };
 
-        const blocks = [_][]const []const u8{&.{entry1}};
+    const Case = struct {
+        createEntries: *const fn (Allocator, Field) anyerror![][]const u8,
+        expectedItemsCount: u64,
+    };
 
-        var readers = try createTestReaders(alloc, &blocks);
+    const cases = [_]Case{
+        .{
+            // Case 1: Single tag record (no merging)
+            .createEntries = &struct {
+                fn f(a: Allocator, t: Field) ![][]const u8 {
+                    var entries = try std.ArrayList([]const u8).initCapacity(a, 1);
+                    errdefer {
+                        for (entries.items) |entry| a.free(entry);
+                        entries.deinit(a);
+                    }
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, &[_]u128{ 100, 200 }));
+                    return entries.toOwnedSlice(a);
+                }
+            }.f,
+            .expectedItemsCount = 1,
+        },
+        .{
+            // Case 2: Two consecutive tag records, same prefix (should merge)
+            .createEntries = &struct {
+                fn f(a: Allocator, t: Field) ![][]const u8 {
+                    var entries = try std.ArrayList([]const u8).initCapacity(a, 5);
+                    errdefer {
+                        for (entries.items) |entry| a.free(entry);
+                        entries.deinit(a);
+                    }
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant0", 50));
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant0a", 60));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, &[_]u128{100}));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, &[_]u128{200}));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant2", t, &[_]u128{300}));
+                    return entries.toOwnedSlice(a);
+                }
+            }.f,
+            .expectedItemsCount = 4,
+        },
+        .{
+            // Case 3: Two consecutive tag records, different tenant (should NOT merge)
+            .createEntries = &struct {
+                fn f(a: Allocator, t: Field) ![][]const u8 {
+                    var entries = try std.ArrayList([]const u8).initCapacity(a, 5);
+                    errdefer {
+                        for (entries.items) |entry| a.free(entry);
+                        entries.deinit(a);
+                    }
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant0", 50));
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant0a", 60));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, &[_]u128{100}));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant2", t, &[_]u128{200}));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant3", t, &[_]u128{300}));
+                    return entries.toOwnedSlice(a);
+                }
+            }.f,
+            .expectedItemsCount = 5,
+        },
+        .{
+            // Case 4: Mixed IndexKind entries
+            .createEntries = &struct {
+                fn f(a: Allocator, t: Field) ![][]const u8 {
+                    var entries = try std.ArrayList([]const u8).initCapacity(a, 2);
+                    errdefer {
+                        for (entries.items) |entry| a.free(entry);
+                        entries.deinit(a);
+                    }
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant1", 100));
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, &[_]u128{100}));
+                    return entries.toOwnedSlice(a);
+                }
+            }.f,
+            .expectedItemsCount = 2,
+        },
+        .{
+            // Case 5: Duplicate streamIDs causing unsorted output after merge (fallback to original)
+            // This tests the scenario where merging would create unsorted data:
+            // - item1 has duplicates: [100, 100, ..., 500]
+            // - item2 has: [100, 400]
+            // After dedup, item1 becomes [100, 500], item2 stays [100, 400]
+            // This makes item1 > item2, so we fallback to original unmerged data
+            .createEntries = &struct {
+                fn f(a: Allocator, t: Field) ![][]const u8 {
+                    var entries = try std.ArrayList([]const u8).initCapacity(a, 4);
+                    errdefer {
+                        for (entries.items) |entry| a.free(entry);
+                        entries.deinit(a);
+                    }
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant0", 5));
+                    // Create streamIDs with many duplicates: [100, 100, ..., 100, 500]
+                    // After dedup in merged output: [100, 500]
+                    var streamIDs1 = try std.ArrayList(u128).initCapacity(a, 5);
+                    defer streamIDs1.deinit(a);
+                    for (0..4) |_| {
+                        streamIDs1.appendAssumeCapacity(10);
+                    }
+                    streamIDs1.appendAssumeCapacity(50);
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, streamIDs1.items));
+                    // Second record with streamIDs: [100, 400]
+                    // Would come after deduplicated first record [100, 500]
+                    // but 500 > 400, making merged output unsorted
+                    entries.appendAssumeCapacity(try createTagRecord(a, "tenant1", t, &[_]u128{ 10, 40 }));
+                    entries.appendAssumeCapacity(try createSidEntry(a, "tenant2", 60));
+                    return entries.toOwnedSlice(a);
+                }
+            }.f,
+            .expectedItemsCount = 4, // Should keep original 4 items due to unsorted merge result
+        },
+    };
+
+    for (cases) |case| {
+        const entries = try case.createEntries(alloc, tag);
+        defer {
+            for (entries) |entry| alloc.free(entry);
+            alloc.free(entries);
+        }
+
+        var readers = try createTestReaders(alloc, &.{entries});
         defer cleanupReaders(alloc, &readers);
 
         var memTable = try createTestMemTable(alloc);
@@ -463,120 +575,7 @@ test "BlockMerger.merge tag records" {
 
         const tableHeader = try merger.merge(alloc, &writer, null);
 
-        // Single tag record, no merging expected
-        try testing.expectEqual(@as(u64, 1), tableHeader.itemsCount);
-    }
-
-    // Test case 2: Two consecutive tag records, same prefix (should merge)
-    {
-        const tag2 = Field{ .key = "env", .value = "prod" };
-        const entry1 = try createTagRecord(alloc, "tenant1", tag2, &[_]u128{100});
-        defer alloc.free(entry1);
-        const entry2 = try createTagRecord(alloc, "tenant1", tag2, &[_]u128{200});
-        defer alloc.free(entry2);
-
-        // Need padding before and after tag records to avoid boundary conditions
-        // Create entries with kind > 2 (sidToTags = 1, tagToSids = 2, so use kind 3+)
-        // Actually, let's use sid entries and add a trailing tag entry
-        const sidEntry1 = try createSidEntry(alloc, "tenant0", 50);
-        defer alloc.free(sidEntry1);
-        const sidEntry2 = try createSidEntry(alloc, "tenant0a", 60);
-        defer alloc.free(sidEntry2);
-        const entry3 = try createTagRecord(alloc, "tenant2", tag2, &[_]u128{300});
-        defer alloc.free(entry3);
-
-        // Items sorted lexicographically: kind=0 < kind=2
-        // sidEntry1[0,tenant0] < sidEntry2[0,tenant0a] < entry1[2,tenant1] < entry2[2,tenant1] < entry3[2,tenant2]
-        const blocks = [_][]const []const u8{&.{ sidEntry1, sidEntry2, entry1, entry2, entry3 }};
-
-        var readers = try createTestReaders(alloc, &blocks);
-        defer cleanupReaders(alloc, &readers);
-
-        var memTable = try createTestMemTable(alloc);
-        defer memTable.deinit(alloc);
-
-        var writer = BlockWriter.initFromMemTable(memTable);
-        defer writer.deinit(alloc);
-
-        var merger = try BlockMerger.init(alloc, &readers);
-        defer merger.deinit(alloc);
-
-        const tableHeader = try merger.merge(alloc, &writer, null);
-
-        // sidEntry1 (first, preserved) + sidEntry2 + merged(entry1,entry2) + entry3 + entry3 (last, preserved)
-        // Wait, entry3 is last so preserved... let me recalculate:
-        // Position 0 (first): sidEntry1 - preserved
-        // Position 1: sidEntry2 - not tagToSids, appended as-is
-        // Position 2: entry1 - tagToSids, merged with entry2
-        // Position 3: entry2 - tagToSids, same prefix as entry1, merged
-        // Position 4 (last): entry3 - preserved
-        // Result: sidEntry1 + sidEntry2 + merged(entry1,entry2) + entry3 = 4
-        try testing.expectEqual(@as(u64, 4), tableHeader.itemsCount);
-    }
-
-    // Test case 3: Two consecutive tag records, different tenant (should NOT merge)
-    {
-        const tag3 = Field{ .key = "env", .value = "prod" };
-        const entry1 = try createTagRecord(alloc, "tenant1", tag3, &[_]u128{100});
-        defer alloc.free(entry1);
-        const entry2 = try createTagRecord(alloc, "tenant2", tag3, &[_]u128{200});
-        defer alloc.free(entry2);
-
-        const sidEntry1 = try createSidEntry(alloc, "tenant0", 50);
-        defer alloc.free(sidEntry1);
-        const sidEntry2 = try createSidEntry(alloc, "tenant0a", 60);
-        defer alloc.free(sidEntry2);
-        const entry3 = try createTagRecord(alloc, "tenant3", tag3, &[_]u128{300});
-        defer alloc.free(entry3);
-
-        // Items sorted lexicographically: kind byte comes first
-        // sidEntry1[0,tenant0] < sidEntry2[0,tenant0a] < entry1[2,tenant1] < entry2[2,tenant2] < entry3[2,tenant3]
-        const blocks = [_][]const []const u8{&.{ sidEntry1, sidEntry2, entry1, entry2, entry3 }};
-
-        var readers = try createTestReaders(alloc, &blocks);
-        defer cleanupReaders(alloc, &readers);
-
-        var memTable = try createTestMemTable(alloc);
-        defer memTable.deinit(alloc);
-
-        var writer = BlockWriter.initFromMemTable(memTable);
-        defer writer.deinit(alloc);
-
-        var merger = try BlockMerger.init(alloc, &readers);
-        defer merger.deinit(alloc);
-
-        const tableHeader = try merger.merge(alloc, &writer, null);
-
-        // Should NOT merge (different tenants):
-        // sidEntry1 (first, preserved) + sidEntry2 + entry1 + entry2 + entry3 (last, preserved) = 5
-        try testing.expectEqual(@as(u64, 5), tableHeader.itemsCount);
-    }
-
-    // Test case 4: Mixed IndexKind entries
-    {
-        const tag4 = Field{ .key = "env", .value = "prod" };
-        const tagEntry = try createTagRecord(alloc, "tenant1", tag4, &[_]u128{100});
-        defer alloc.free(tagEntry);
-        const sidEntry = try createSidEntry(alloc, "tenant1", 100);
-        defer alloc.free(sidEntry);
-
-        const blocks = [_][]const []const u8{&.{ sidEntry, tagEntry }};
-
-        var readers = try createTestReaders(alloc, &blocks);
-        defer cleanupReaders(alloc, &readers);
-
-        var memTable = try createTestMemTable(alloc);
-        defer memTable.deinit(alloc);
-
-        var writer = BlockWriter.initFromMemTable(memTable);
-        defer writer.deinit(alloc);
-
-        var merger = try BlockMerger.init(alloc, &readers);
-        defer merger.deinit(alloc);
-
-        const tableHeader = try merger.merge(alloc, &writer, null);
-
-        try testing.expectEqual(@as(u64, 2), tableHeader.itemsCount);
+        try testing.expectEqual(case.expectedItemsCount, tableHeader.itemsCount);
     }
 }
 
