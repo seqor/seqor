@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 
 const MemOrder = @import("../../stds/sort.zig").MemOrder;
 
+const Conf = @import("../../Conf.zig");
 const BlockReader = @import("BlockReader.zig");
 const MemBlock = @import("MemBlock.zig");
 const BlockWriter = @import("BlockWriter.zig");
@@ -48,7 +49,7 @@ pub fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerge
 
     return .{
         .heap = heap,
-        .block = try MemBlock.init(alloc),
+        .block = try MemBlock.init(alloc, Conf.getConf().app.maxIndexMemBlockSize),
     };
 }
 
@@ -99,7 +100,7 @@ pub fn merge(
                 break;
             }
 
-            if (!try self.block.add(alloc, item)) {
+            if (!self.block.add(item)) {
                 try self.flush(alloc, writer, &tableHeader);
                 continue;
             }
@@ -246,19 +247,23 @@ const Encoder = @import("encoding").Encoder;
 
 // Helper functions for tests
 
-fn createTestMemBlock(alloc: Allocator, entries: []const []const u8) !*MemBlock {
-    const block = try MemBlock.init(alloc);
+fn createTestMemBlock(alloc: Allocator, entries: []const []const u8, maxIndexBlockSize: u32) !*MemBlock {
+    const block = try MemBlock.init(alloc, maxIndexBlockSize);
     block.prefix = ""; // Initialize to empty string to avoid undefined behavior
     for (entries) |entry| {
-        _ = try block.add(alloc, entry);
+        _ = block.add(entry);
     }
     return block;
 }
 
-fn createTestReaders(alloc: Allocator, blocksData: []const []const []const u8) !std.ArrayList(*BlockReader) {
+fn createTestReaders(
+    alloc: Allocator,
+    blocksData: []const []const []const u8,
+    maxIndexBlockSize: u32,
+) !std.ArrayList(*BlockReader) {
     var readers = try std.ArrayList(*BlockReader).initCapacity(alloc, blocksData.len);
     for (blocksData) |blockData| {
-        const block = try createTestMemBlock(alloc, blockData);
+        const block = try createTestMemBlock(alloc, blockData, maxIndexBlockSize);
         const reader = try BlockReader.initFromMemBlock(alloc, block);
         reader.currentI = 0;
         try readers.append(alloc, reader);
@@ -337,6 +342,7 @@ fn createSidEntry(alloc: Allocator, tenantID: []const u8, streamID: u128) ![]con
 
 test "BlockMerger.merge basic scenarios" {
     const alloc = testing.allocator;
+    const maxIndexBlockSize = 1024;
 
     const Case = struct {
         blocks: []const []const []const u8,
@@ -379,7 +385,7 @@ test "BlockMerger.merge basic scenarios" {
     };
 
     for (cases) |case| {
-        var readers = try createTestReaders(alloc, case.blocks);
+        var readers = try createTestReaders(alloc, case.blocks, maxIndexBlockSize);
         defer cleanupReaders(alloc, &readers);
 
         var memTable = try createTestMemTable(alloc);
@@ -405,39 +411,41 @@ test "BlockMerger.merge basic scenarios" {
     }
 }
 
-// test "BlockMerger.merge block overflow" {
-//     const alloc = testing.allocator;
-//
-//     // Generate 350 entries of 100 bytes each = 35KB total (exceeds 32KB block size)
-//     const largeEntries = try generateLargeEntries(alloc, 350, 100);
-//     defer {
-//         for (largeEntries) |entry| alloc.free(entry);
-//         alloc.free(largeEntries);
-//     }
-//
-//     // Split entries across two readers
-//     const mid = largeEntries.len / 2;
-//     const blocks = [_][]const []const u8{
-//         largeEntries[0..mid],
-//         largeEntries[mid..],
-//     };
-//
-//     var readers = try createTestReaders(alloc, &blocks);
-//     defer cleanupReaders(alloc, &readers);
-//
-//     var memTable = try createTestMemTable(alloc);
-//     defer memTable.deinit(alloc);
-//
-//     var writer = BlockWriter.initFromMemTable(memTable);
-//     var merger = try BlockMerger.init(alloc, &readers);
-//
-//     const tableHeader = try merger.merge(alloc, &writer, null);
-//
-//     try testing.expectEqual(@as(u64, @intCast(largeEntries.len)), tableHeader.itemsCount);
-// }
+test "BlockMerger.merge block overflow" {
+    const alloc = testing.allocator;
+    const maxIndexBlockSize = 1024;
+
+    // Generate 350 entries of 100 bytes each = 35KB total (exceeds 32KB block size)
+    const largeEntries = try generateLargeEntries(alloc, 350, 100);
+    defer {
+        for (largeEntries) |entry| alloc.free(entry);
+        alloc.free(largeEntries);
+    }
+
+    // Split entries across two readers
+    const mid = largeEntries.len / 2;
+    const blocks = [_][]const []const u8{
+        largeEntries[0..mid],
+        largeEntries[mid..],
+    };
+
+    var readers = try createTestReaders(alloc, &blocks, maxIndexBlockSize);
+    defer cleanupReaders(alloc, &readers);
+
+    var memTable = try createTestMemTable(alloc);
+    defer memTable.deinit(alloc);
+
+    var writer = BlockWriter.initFromMemTable(memTable);
+    var merger = try BlockMerger.init(alloc, &readers);
+
+    const tableHeader = try merger.merge(alloc, &writer, null);
+
+    try testing.expectEqual(@as(u64, @intCast(largeEntries.len)), tableHeader.itemsCount);
+}
 
 test "BlockMerger.merge tag records" {
     const alloc = testing.allocator;
+    const maxIndexBlockSize = 1024;
 
     const tag = Field{ .key = "env", .value = "prod" };
 
@@ -559,7 +567,7 @@ test "BlockMerger.merge tag records" {
             alloc.free(entries);
         }
 
-        var readers = try createTestReaders(alloc, &.{entries});
+        var readers = try createTestReaders(alloc, &.{entries}, maxIndexBlockSize);
         defer cleanupReaders(alloc, &readers);
 
         var memTable = try createTestMemTable(alloc);
@@ -579,9 +587,10 @@ test "BlockMerger.merge tag records" {
 
 test "BlockMerger.merge stopped flag" {
     const alloc = testing.allocator;
+    const maxIndexBlockSize = 1024;
 
     var stopped = std.atomic.Value(bool).init(true);
-    var readers = try createTestReaders(alloc, &.{&.{ "a", "b", "c" }});
+    var readers = try createTestReaders(alloc, &.{&.{ "a", "b", "c" }}, maxIndexBlockSize);
     defer cleanupReaders(alloc, &readers);
 
     var memTable = try createTestMemTable(alloc);

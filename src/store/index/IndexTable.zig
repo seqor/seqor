@@ -5,6 +5,8 @@ const Entries = @import("Entries.zig");
 const MemBlock = @import("MemBlock.zig");
 const MemTable = @import("MemTable.zig");
 
+const Conf = @import("../../Conf.zig");
+
 const maxBlocksPerShard = 256;
 
 // TODO: worth tuning on practice
@@ -19,6 +21,9 @@ blocksToFlush: std.ArrayList(*MemBlock),
 mxBlocks: std.Thread.Mutex = .{},
 flushAtUs: ?i64 = null,
 blocksThresholdToFlush: u32,
+
+// config fields
+maxIndexBlockSize: u32,
 
 pub fn init(alloc: Allocator, flushInterval: u64) !*Self {
     const entries = try Entries.init(alloc);
@@ -36,13 +41,14 @@ pub fn init(alloc: Allocator, flushInterval: u64) !*Self {
         .entries = entries,
         .blocksThresholdToFlush = @intCast(entries.shards.len * maxBlocksPerShard),
         .blocksToFlush = blocksToFlush,
+        .maxIndexBlockSize = Conf.getConf().app.maxIndexMemBlockSize,
     };
     return t;
 }
 
 pub fn add(self: *Self, alloc: Allocator, entries: [][]const u8) !void {
     const shard = self.entries.next();
-    const blocksList = try shard.add(alloc, entries);
+    const blocksList = try shard.add(alloc, entries, self.maxIndexBlockSize);
     if (blocksList == null) return;
 
     var blocks = blocksList.?;

@@ -47,6 +47,12 @@ app: AppConfig,
 
 const Conf = @This();
 
+// TODO: thiis is currently the only way to setup the cofnig,
+// ideal solution would be:
+// 1. have a global config instannce
+// 2. easy override per test, so another runnig parallel test doesn't impact it
+// probably the config gonna be define per package here and the package intry point accepts it,
+// which further distributes its values to the dependencies
 pub fn default() Conf {
     const pools = calculatePools();
     conf = Conf{
@@ -80,11 +86,4 @@ pub fn init(allocator: std.mem.Allocator, path: []const u8) !Conf {
         .app = result.app,
     };
     return conf;
-}
-
-/// initFromConf creates a config and sets it globally,
-/// testing purpose only
-pub fn initFromConf(val: Conf) Conf {
-    conf = val;
-    return val;
 }

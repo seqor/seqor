@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const builtin = @import("builtin");
 
-const getConf = @import("../../conf.zig").getConf;
+const Conf = @import("../../Conf.zig");
 
 const MemBlock = @import("MemBlock.zig");
 
@@ -14,12 +14,17 @@ const EntriesShard = struct {
 
     // TODO: init blocks with maxBlocks capacity
 
-    pub fn add(self: *EntriesShard, alloc: Allocator, entries: [][]const u8) !?std.ArrayList(*MemBlock) {
+    pub fn add(
+        self: *EntriesShard,
+        alloc: Allocator,
+        entries: [][]const u8,
+        maxMemBlockSize: u32,
+    ) !?std.ArrayList(*MemBlock) {
         self.mx.lock();
         defer self.mx.unlock();
 
         if (self.blocks.items.len == 0) {
-            const b = try MemBlock.init(alloc);
+            const b = try MemBlock.init(alloc, maxMemBlockSize);
             try self.blocks.append(alloc, b);
             self.flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
         }
@@ -27,17 +32,17 @@ const EntriesShard = struct {
         var block = self.blocks.items[self.blocks.items.len - 1];
 
         for (entries) |entry| {
-            if (try block.add(alloc, entry)) continue;
+            if (block.add(entry)) continue;
 
             // Skip too long item
-            if (entry.len > MemBlock.maxMemBlockSize) {
+            if (entry.len > maxMemBlockSize) {
                 var logPrefix = entry;
                 if (logPrefix.len > 32) {
                     logPrefix = logPrefix[0..32];
                 }
                 std.debug.print(
                     "skip adding item to index, must not exceed {d} bytes, given={d}, value={s}\n",
-                    .{ MemBlock.maxMemBlockSize, entry.len, logPrefix },
+                    .{ maxMemBlockSize, entry.len, logPrefix },
                 );
                 continue;
             }
@@ -46,10 +51,10 @@ const EntriesShard = struct {
             // instead of creating new block it has to return the unprocessed entries
 
             // if it didn't skip the block means the previous one has not enough space
-            block = try MemBlock.init(alloc);
+            block = try MemBlock.init(alloc, maxMemBlockSize);
             try self.blocks.append(alloc, block);
 
-            const ok = try block.add(alloc, entry);
+            const ok = block.add(entry);
             if (builtin.is_test) {
                 std.debug.assert(ok);
             }
@@ -78,7 +83,7 @@ shardIdx: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 shards: []EntriesShard,
 
 pub fn init(alloc: Allocator) !*Entries {
-    const conf = getConf().server.pools;
+    const conf = Conf.getConf().server.pools;
     std.debug.assert(conf.cpus != 0);
 
     const shards = try alloc.alloc(EntriesShard, conf.cpus);
@@ -105,6 +110,8 @@ const testing = std.testing;
 
 test "Entries.shardIdxOverflow" {
     const alloc = testing.allocator;
+    _ = Conf.default();
+
     const e = try Entries.init(alloc);
     defer e.deinit(alloc);
     e.shardIdx = .init(std.math.maxInt(usize));
@@ -123,6 +130,7 @@ test "Entries.shardIdxOverflow" {
 
 test "EntriesShard.flushesAllBlocksIncludingExtras" {
     const alloc = testing.allocator;
+    const maxIndexMemBlockSize = 1024;
 
     var shard = EntriesShard{
         .mx = .{},
@@ -136,16 +144,16 @@ test "EntriesShard.flushesAllBlocksIncludingExtras" {
 
     // Setup: create maxBlocksPerShard blocks with last one full
     for (0..maxBlocksPerShard) |_| {
-        const b = try MemBlock.init(alloc);
+        const b = try MemBlock.init(alloc, maxIndexMemBlockSize);
         try shard.blocks.append(alloc, b);
     }
     const lastBlock = shard.blocks.items[shard.blocks.items.len - 1];
     const filler = "y" ** 100;
-    while (lastBlock.size + filler.len <= MemBlock.maxMemBlockSize) {
-        _ = try lastBlock.add(alloc, filler);
+    while (lastBlock.size + filler.len <= maxIndexMemBlockSize) {
+        _ = lastBlock.add(filler);
     }
     try testing.expectEqual(maxBlocksPerShard, shard.blocks.items.len);
-    const remainingSpace = MemBlock.maxMemBlockSize - lastBlock.size;
+    const remainingSpace = maxIndexMemBlockSize - lastBlock.size;
 
     // Add entry that doesn't fit - will create block #257
     const entry_buf = try alloc.alloc(u8, remainingSpace + 1);
@@ -155,7 +163,7 @@ test "EntriesShard.flushesAllBlocksIncludingExtras" {
 
     // add() processes ALL entries even if it temporarily exceeds maxBlocksPerShard,
     // then flushes everything including the extra blocks
-    const result = try shard.add(alloc, &entries);
+    const result = try shard.add(alloc, &entries, maxIndexMemBlockSize);
 
     try testing.expect(result != null);
     var flushed = result.?;
@@ -172,9 +180,10 @@ test "EntriesShard.flushesAllBlocksIncludingExtras" {
 }
 
 test "EntriesShard.add" {
+    const maxIndexMemBlockSize = 1024;
     const alloc = testing.allocator;
-    const tooLarge = "x" ** (MemBlock.maxMemBlockSize + 1);
-    const theLargest = "x" ** (MemBlock.maxMemBlockSize - 1);
+    const tooLarge = "x" ** (maxIndexMemBlockSize + 1);
+    const theLargest = "x" ** (maxIndexMemBlockSize - 1);
 
     const Case = struct {
         fill_block_after_setup: bool = false,
@@ -250,20 +259,20 @@ test "EntriesShard.add" {
         // Setup blocks if specified
         if (case.setup_blocks_count > 0) {
             for (0..case.setup_blocks_count) |_| {
-                const b = try MemBlock.init(alloc);
+                const b = try MemBlock.init(alloc, maxIndexMemBlockSize);
                 try shard.blocks.append(alloc, b);
             }
         }
 
         if (case.fill_block_after_setup and shard.blocks.items.len > 0) {
             const block = shard.blocks.items[shard.blocks.items.len - 1];
-            const filler = "y" ** (MemBlock.maxMemBlockSize - 100);
-            while (block.size + filler.len <= MemBlock.maxMemBlockSize) {
-                _ = try block.add(alloc, filler);
+            const filler = "y" ** (maxIndexMemBlockSize - 100);
+            while (block.size + filler.len <= maxIndexMemBlockSize) {
+                _ = block.add(filler);
             }
         }
 
-        const result = try shard.add(alloc, @constCast(case.test_entries));
+        const result = try shard.add(alloc, @constCast(case.test_entries), maxIndexMemBlockSize);
 
         // Check if flush happened as expected
         if (case.expected_flush) {

@@ -16,10 +16,6 @@ const EncodedMemBlock = struct {
     encodingType: EncodingType,
 };
 
-// TODO: make it configurable,
-// depending on used CPU model must be changed according its L1 cache size
-pub const maxMemBlockSize = 32 * 1024;
-
 fn findPrefix(first: []const u8, second: []const u8) []const u8 {
     const n = @min(first.len, second.len);
     var i: usize = 0;
@@ -36,7 +32,10 @@ prefix: []const u8,
 // stateBuffer is used for ownership of new record items during the merging,
 stateBuffer: ?std.ArrayList(u8) = null,
 
-pub fn init(alloc: Allocator) !*MemBlock {
+pub fn init(
+    alloc: Allocator,
+    maxMemBlockSize: u32,
+) !*MemBlock {
     var data = try std.ArrayList([]const u8).initCapacity(alloc, maxMemBlockSize);
     errdefer data.deinit(alloc);
 
@@ -60,10 +59,10 @@ pub fn reset(self: *MemBlock) void {
     self.prefix = undefined;
 }
 
-pub fn add(self: *MemBlock, alloc: Allocator, entry: []const u8) !bool {
-    if ((self.size + entry.len) > maxMemBlockSize) return false;
+pub fn add(self: *MemBlock, entry: []const u8) bool {
+    if ((self.size + entry.len) > self.data.capacity) return false;
 
-    try self.data.append(alloc, entry);
+    self.data.appendAssumeCapacity(entry);
     self.size += @intCast(entry.len);
     return true;
 }
