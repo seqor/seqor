@@ -27,7 +27,7 @@ const MemBlock = @This();
 
 data: std.ArrayList([]const u8),
 size: u32,
-prefix: []const u8,
+prefix: []const u8 = "",
 
 // stateBuffer is used for ownership of new record items during the merging,
 stateBuffer: ?std.ArrayList(u8) = null,
@@ -43,7 +43,6 @@ pub fn init(
     b.* = .{
         .data = data,
         .size = 0,
-        .prefix = undefined,
     };
     return b;
 }
@@ -230,7 +229,7 @@ pub fn encode(
 fn encodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock) !void {
     try sb.itemsData.ensureUnusedCapacity(
         alloc,
-        self.size - (self.prefix.len * self.data.items.len) - self.data.items[0].len,
+        self.size - self.prefix.len * self.data.items.len + self.prefix.len - self.data.items[0].len,
     );
     try sb.lensData.ensureUnusedCapacity(alloc, 2 * (self.data.items.len - 1));
 

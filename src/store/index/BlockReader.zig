@@ -28,7 +28,7 @@ pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
             .itemsCount = undefined,
             .lastItem = undefined,
         },
-        .currentI = undefined,
+        .currentI = 0,
         .read = false,
     };
     return r;
@@ -53,6 +53,7 @@ pub fn next(self: *BlockReader) !bool {
     // TODO: implement disk block reading
 
     if (self.read) return false;
+    if (self.block.data.items.len == 0) return false;
 
     self.read = true;
     return true;

@@ -249,7 +249,6 @@ const Encoder = @import("encoding").Encoder;
 
 fn createTestMemBlock(alloc: Allocator, entries: []const []const u8, maxIndexBlockSize: u32) !*MemBlock {
     const block = try MemBlock.init(alloc, maxIndexBlockSize);
-    block.prefix = ""; // Initialize to empty string to avoid undefined behavior
     for (entries) |entry| {
         _ = block.add(entry);
     }
@@ -265,7 +264,6 @@ fn createTestReaders(
     for (blocksData) |blockData| {
         const block = try createTestMemBlock(alloc, blockData, maxIndexBlockSize);
         const reader = try BlockReader.initFromMemBlock(alloc, block);
-        reader.currentI = 0;
         try readers.append(alloc, reader);
     }
     return readers;
@@ -288,8 +286,14 @@ fn cleanupReaders(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) void 
     readers.deinit(alloc);
 }
 
-fn generateLargeEntries(alloc: Allocator, count: usize, size: usize) ![][]const u8 {
+fn createTestEntries(alloc: Allocator, count: usize, size: usize) ![][]const u8 {
     var entries = try std.ArrayList([]const u8).initCapacity(alloc, count);
+    errdefer {
+        for (entries.items) |e| {
+            alloc.free(e);
+        }
+        entries.deinit(alloc);
+    }
 
     for (0..count) |i| {
         // Create entries of specified size with sorted data
@@ -415,8 +419,8 @@ test "BlockMerger.merge block overflow" {
     const alloc = testing.allocator;
     const maxIndexBlockSize = 1024;
 
-    // Generate 350 entries of 100 bytes each = 35KB total (exceeds 32KB block size)
-    const largeEntries = try generateLargeEntries(alloc, 350, 100);
+    // Generate 6 entries of 200 bytes each = 1200 bytes total (exceeds 1024 bytes block size)
+    const largeEntries = try createTestEntries(alloc, 6, 200);
     defer {
         for (largeEntries) |entry| alloc.free(entry);
         alloc.free(largeEntries);
@@ -436,11 +440,83 @@ test "BlockMerger.merge block overflow" {
     defer memTable.deinit(alloc);
 
     var writer = BlockWriter.initFromMemTable(memTable);
+    defer writer.deinit(alloc);
+
     var merger = try BlockMerger.init(alloc, &readers);
+    defer merger.deinit(alloc);
 
     const tableHeader = try merger.merge(alloc, &writer, null);
 
     try testing.expectEqual(@as(u64, @intCast(largeEntries.len)), tableHeader.itemsCount);
+}
+
+test "BlockMerger.merge block overflow 2" {
+    const alloc = testing.allocator;
+    const maxIndexBlockSize = 1024;
+
+    // Generate 6 entries of 200 bytes each = 1200 bytes total (exceeds 1024 bytes block size)
+    const largeEntries = try createTestEntries(alloc, 2, 2000);
+    defer {
+        for (largeEntries) |entry| alloc.free(entry);
+        alloc.free(largeEntries);
+    }
+
+    // Split entries across two readers
+    const mid = largeEntries.len / 2;
+    const blocks = [_][]const []const u8{
+        largeEntries[0..mid],
+        largeEntries[mid..],
+    };
+
+    var readers = try createTestReaders(alloc, &blocks, maxIndexBlockSize);
+    defer cleanupReaders(alloc, &readers);
+
+    var memTable = try createTestMemTable(alloc);
+    defer memTable.deinit(alloc);
+
+    var writer = BlockWriter.initFromMemTable(memTable);
+    defer writer.deinit(alloc);
+
+    var merger = try BlockMerger.init(alloc, &readers);
+    defer merger.deinit(alloc);
+
+    const tableHeader = try merger.merge(alloc, &writer, null);
+
+    try testing.expectEqual(0, tableHeader.itemsCount);
+}
+test "BlockMerger.merge block overflow 3" {
+    const alloc = testing.allocator;
+    const maxIndexBlockSize = 1024;
+
+    // Generate 6 entries of 200 bytes each = 1200 bytes total (exceeds 1024 bytes block size)
+    const largeEntries = try createTestEntries(alloc, 20, 200);
+    defer {
+        for (largeEntries) |entry| alloc.free(entry);
+        alloc.free(largeEntries);
+    }
+
+    // Split entries across two readers
+    const mid = largeEntries.len / 2;
+    const blocks = [_][]const []const u8{
+        largeEntries[0..mid],
+        largeEntries[mid..],
+    };
+
+    var readers = try createTestReaders(alloc, &blocks, maxIndexBlockSize);
+    defer cleanupReaders(alloc, &readers);
+
+    var memTable = try createTestMemTable(alloc);
+    defer memTable.deinit(alloc);
+
+    var writer = BlockWriter.initFromMemTable(memTable);
+    defer writer.deinit(alloc);
+
+    var merger = try BlockMerger.init(alloc, &readers);
+    defer merger.deinit(alloc);
+
+    const tableHeader = try merger.merge(alloc, &writer, null);
+
+    try testing.expectEqual(10, tableHeader.itemsCount);
 }
 
 test "BlockMerger.merge tag records" {
