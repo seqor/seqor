@@ -405,7 +405,6 @@ test "BlockMerger.merge basic scenarios" {
     }
 }
 
-// TODO: Fix block overflow test - currently hangs during merge
 // test "BlockMerger.merge block overflow" {
 //     const alloc = testing.allocator;
 //
@@ -423,10 +422,10 @@ test "BlockMerger.merge basic scenarios" {
 //         largeEntries[mid..],
 //     };
 //
-//     var readers = try createReaders(alloc, &blocks);
+//     var readers = try createTestReaders(alloc, &blocks);
 //     defer cleanupReaders(alloc, &readers);
 //
-//     var memTable = try createMemTableForTest(alloc);
+//     var memTable = try createTestMemTable(alloc);
 //     defer memTable.deinit(alloc);
 //
 //     var writer = BlockWriter.initFromMemTable(memTable);
@@ -434,7 +433,6 @@ test "BlockMerger.merge basic scenarios" {
 //
 //     const tableHeader = try merger.merge(alloc, &writer, null);
 //
-//     // Verify all items were written
 //     try testing.expectEqual(@as(u64, @intCast(largeEntries.len)), tableHeader.itemsCount);
 // }
 

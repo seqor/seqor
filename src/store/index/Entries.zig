@@ -104,9 +104,6 @@ pub fn deinit(self: *Entries, alloc: Allocator) void {
 const testing = std.testing;
 
 test "Entries.shardIdxOverflow" {
-    const Conf = @import("../../conf.zig").Conf;
-    _ = Conf.default();
-
     const alloc = testing.allocator;
     const e = try Entries.init(alloc);
     defer e.deinit(alloc);
