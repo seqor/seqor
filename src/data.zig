@@ -15,6 +15,8 @@ inline fn setFlushTime() i64 {
 pub const DataShard = struct {
     mx: std.Thread.Mutex = .{},
     lines: std.ArrayList(*const Line) = std.ArrayList(*const Line).empty,
+    // TODO: currently there is a single background process flushing the data shards
+    // try instead assign a timer task to a shard and benchmark on high amount of shard (high amount of cpu)
     flushAtUs: ?i64 = null,
 
     // threshold as 90% of a max block size

@@ -44,3 +44,31 @@ Nice to have:
     1. why static allocation is not the best 
     2. write logs effectively
 
+### tiny package movements
+- extract structs from store/inmem/block_header.zig
+- move data.zig to data/Data.zig
+- separate data and data/MemTable packages
+- separate index and index/Memtable packages
+
+###  tests todos
+
+##### index
+
+- index
+- index table
+- writer
+- mem block
+- mem table
+- meta index
+- table header
+- tag merger
+- tag state
+
+##### data
+
+- block writer
+- columns header index
+- stream writer
+- table header
+- mem table
+
