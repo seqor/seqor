@@ -6,15 +6,17 @@ const encoding = @import("encoding");
 
 const MemBlock = @import("MemBlock.zig");
 const MemTable = @import("MemTable.zig");
-const TableHeader = @import("TableHeader.zig");
 const MetaIndexRecord = @import("MetaIndexRecord.zig");
+const StorageBlock = @import("StorageBlock.zig");
+const TableHeader = @import("TableHeader.zig");
+const BlockHeader = @import("BlockHeader.zig");
+
+const assertable = builtin.mode == .ReleaseSafe or builtin.mode == .Debug;
 
 const BlockReader = @This();
 
 block: ?*MemBlock,
 tableHeader: TableHeader,
-
-metaIndexRecords: []MetaIndexRecord = &.{},
 
 // TODO: these buffers could be files, on zig 0.16 implement a reader API,
 // this change will require implementing a proper close method
@@ -28,6 +30,31 @@ lensBuf: std.ArrayList(u8) = .empty,
 currentI: usize,
 // read defines if the block has been read
 isRead: bool,
+
+// metaindex state
+metaIndexI: usize = 0,
+// metaindex passed on init
+metaIndexRecords: []MetaIndexRecord = &.{},
+// compressed buf
+compressedBuf: std.ArrayList(u8) = .empty,
+// uncompressed buf
+uncompressedBuf: std.ArrayList(u8) = .empty,
+
+// current block header index
+blockHeaderI: usize = 0,
+// all block headers read from the buffers
+blockHeaders: []BlockHeader = &.{},
+// current block header
+// TODO: perhaps remove it in order not to hold the pointer
+blockHeader: *BlockHeader = undefined,
+// current storage block
+sb: StorageBlock = .{},
+// number of blocks read
+blocksRead: usize = 0,
+// number of items read
+itemsRead: usize = 0,
+
+firstItemChecked: if (assertable) bool else void = if (assertable) false else {},
 
 pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
     block.sortData();
@@ -93,7 +120,7 @@ pub inline fn current(self: *BlockReader) []const u8 {
     return self.block.?.data.items[self.currentI];
 }
 
-pub fn next(self: *BlockReader) !bool {
+pub fn next(self: *BlockReader, alloc: Allocator) !bool {
     if (self.isRead) return false;
 
     if (self.block) |block| {
@@ -102,8 +129,79 @@ pub fn next(self: *BlockReader) !bool {
         return true;
     }
 
-    self.isRead = true;
-    return false;
+    if (self.blockHeaderI >= self.tableHeader.blocksCount) {
+        const ok = try self.readNextBlockHeaders(alloc);
+        if (!ok) {
+            const lastItem = self.block.?.data.items[self.block.?.data.items.len - 1];
+            std.debug.assert(std.mem.eql(u8, self.tableHeader.lastItem, lastItem));
+            self.isRead = true;
+            return ok;
+        }
+    }
+
+    self.blockHeader = &self.blockHeaders[self.blockHeaderI];
+    self.blockHeaderI += 1;
+
+    // TODO: for chunked buffer find a way just to  transfer a chunk ownership, perhaps via std.mem.swap,
+    // for a file reader we must just read the content
+    self.sb.itemsData.clearRetainingCapacity();
+    try self.sb.itemsData.ensureUnusedCapacity(alloc, self.blockHeader.itemsBlockSize);
+    @memmove(self.sb.itemsData.unusedCapacitySlice(), self.dataBuf.items);
+    self.sb.itemsData.items.len = self.dataBuf.items.len;
+
+    self.sb.lensData.clearRetainingCapacity();
+    try self.sb.lensData.ensureUnusedCapacity(alloc, self.blockHeader.lensBlockSize);
+    @memmove(self.sb.lensData.unusedCapacitySlice(), self.lensBuf.items);
+    self.sb.lensData.items.len = self.lensBuf.items.len;
+
+    try self.block.?.decode(
+        alloc,
+        &self.sb,
+        self.blockHeader.firstItem,
+        self.blockHeader.prefix,
+        self.blockHeader.itemsCount,
+        self.blockHeader.encodingType,
+    );
+    self.blocksRead += 1;
+    std.debug.assert(self.blocksRead <= self.tableHeader.blocksCount);
+    self.currentI = 0;
+    self.itemsRead += self.block.?.data.items.len;
+    std.debug.assert(self.itemsRead <= self.tableHeader.itemsCount);
+
+    if (!self.firstItemChecked) {
+        self.firstItemChecked = true;
+        const firstItem = self.block.?.data.items[0];
+        std.debug.assert(std.mem.eql(u8, self.tableHeader.firstItem, firstItem));
+    }
+    return true;
+}
+
+fn readNextBlockHeaders(self: *BlockReader, alloc: Allocator) !bool {
+    if (self.metaIndexI >= self.metaIndexRecords.len) {
+        return false;
+    }
+
+    const mi = &self.metaIndexRecords[self.metaIndexI];
+    self.metaIndexI += 1;
+
+    self.compressedBuf.clearRetainingCapacity();
+    try self.compressedBuf.ensureUnusedCapacity(alloc, mi.indexBlockSize);
+    @memmove(self.compressedBuf.unusedCapacitySlice(), self.indexBuf.items);
+    self.compressedBuf.items.len = self.indexBuf.items.len;
+
+    self.uncompressedBuf.clearRetainingCapacity();
+    const uncompressedSize = try encoding.getFrameContentSize(self.compressedBuf.items);
+    try self.uncompressedBuf.ensureUnusedCapacity(alloc, uncompressedSize);
+    const bufOffset = try encoding.decompress(
+        self.uncompressedBuf.unusedCapacitySlice(),
+        self.compressedBuf.items,
+    );
+    self.uncompressedBuf.items.len = bufOffset;
+
+    if (self.blockHeaders.len > 0) alloc.free(self.blockHeaders);
+    self.blockHeaders = try BlockHeader.decodeMany(alloc, self.uncompressedBuf.items, mi.blockHeadersCount);
+    self.blockHeaderI = 0;
+    return true;
 }
 
 fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blocksCount: usize) ![]MetaIndexRecord {

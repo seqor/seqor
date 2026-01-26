@@ -247,3 +247,22 @@ fn encodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock) !void {
     }
     sb.lensData.items.len = enc.offset;
 }
+
+pub fn decode(
+    self: *MemBlock,
+    alloc: Allocator,
+    sb: *StorageBlock,
+    firstItem: []const u8,
+    prefix: []const u8,
+    itemsCount: u32,
+    encodingType: EncodingType,
+) !void {
+    _ = self;
+    _ = alloc;
+    _ = sb;
+    _ = firstItem;
+    _ = prefix;
+    _ = itemsCount;
+    _ = encodingType;
+    unreachable;
+}

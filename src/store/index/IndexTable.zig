@@ -303,3 +303,31 @@ fn swapTables(
     // but the call might be necessary to support concurrent jobs running,
     // worth taking a metric of it
 }
+
+fn startCacheKeyInvalidator(self: *Self) !void {
+    // TODO: add time sleep jitter
+    self.wg.spawnManager(startCacheKeyInvalidatorTask, .{self});
+}
+
+fn startCacheKeyInvalidatorTask(self: *Self) void {
+    while (true) {
+        std.time.sleep(std.time.ns_per_s * 10);
+
+        if (self.stopped.load(.acquire)) {
+            self.invalidateStreamFilterCache();
+            return;
+        }
+
+        if (self.needInvalidate.cmpxchgWeak(false, true, .release, .monotonic)) {
+            self.invalidateStreamFilterCache();
+        }
+    }
+}
+
+fn startMemTablesFlusher(self: *Self, _: Allocator) void {
+    _ = self;
+}
+
+fn startEntriesFlusher(self: *Self, _: Allocator) void {
+    _ = self;
+}

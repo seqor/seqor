@@ -35,7 +35,7 @@ pub fn init(alloc: Allocator, readers: *std.ArrayList(*BlockReader)) !BlockMerge
     var i: usize = 0;
     while (i < readers.items.len) {
         const reader = readers.items[i];
-        const hasNext = try reader.next();
+        const hasNext = try reader.next(alloc);
         if (!hasNext) {
             reader.deinit(alloc);
             _ = readers.swapRemove(i);
@@ -108,7 +108,7 @@ pub fn merge(
         }
 
         if (reader.currentI == items.len) {
-            if (try reader.next()) {
+            if (try reader.next(alloc)) {
                 self.heap.fix(0);
                 continue;
             }
