@@ -63,6 +63,7 @@ Nice to have:
 - table header
 - tag merger
 - tag state
+- meta index record
 
 ##### data
 
@@ -71,4 +72,5 @@ Nice to have:
 - stream writer
 - table header
 - mem table
+- data
 

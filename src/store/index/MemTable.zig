@@ -14,6 +14,8 @@ const BlockMerger = @import("BlockMerger.zig");
 
 const MemTable = @This();
 
+const flush = @import("flush/flush.zig");
+
 blockHeader: BlockHeader,
 tableHeader: TableHeader,
 metaIndex: MetaIndex,
@@ -23,6 +25,16 @@ indexBuf: std.ArrayList(u8) = .empty,
 metaindexBuf: std.ArrayList(u8) = .empty,
 
 flushAtUs: ?i64 = null,
+
+pub fn empty(alloc: Allocator) !*MemTable {
+    const t = try alloc.create(MemTable);
+    t.* = .{
+        .blockHeader = undefined,
+        .tableHeader = undefined,
+        .metaIndex = undefined,
+    };
+    return t;
+}
 
 pub fn init(alloc: Allocator, blocks: []*MemBlock) !*MemTable {
     var readers = try std.ArrayList(*BlockReader).initCapacity(alloc, blocks.len);
@@ -49,6 +61,24 @@ pub fn init(alloc: Allocator, blocks: []*MemBlock) !*MemTable {
 
     const flushAtUs = std.time.microTimestamp() + std.time.us_per_s;
     try t.mergeIntoMemTable(alloc, &readers, flushAtUs);
+    return t;
+}
+
+pub fn mergeTables(alloc: Allocator, memTables: []*MemTable) !*MemTable {
+    var readers = try std.ArrayList(*BlockReader).initCapacity(alloc, memTables.len);
+    errdefer {
+        for (readers.items) |r| r.deinit(alloc);
+        readers.deinit(alloc);
+    }
+    for (memTables) |table| {
+        const reader = try BlockReader.initFromMemTable(alloc, table);
+        readers.appendAssumeCapacity(reader);
+    }
+    const t = try alloc.create(MemTable);
+    errdefer alloc.destroy(t);
+
+    const flushToDiskAtUs = flush.getFlushToDiskDeadline(memTables);
+    try t.mergeIntoMemTable(alloc, &readers, flushToDiskAtUs);
     return t;
 }
 
@@ -123,20 +153,21 @@ fn mergeIntoMemTable(
     var outItemsCount: u64 = 0;
     for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
 
-    try self.mergeBlocks(alloc, "", readers, null);
+    var writer = BlockWriter.initFromMemTable(self);
+    try self.mergeBlocks(alloc, "", &writer, readers, null);
 }
 
-fn mergeBlocks(
+pub fn mergeBlocks(
     self: *MemTable,
     alloc: Allocator,
     tablePath: []const u8,
+    writer: *BlockWriter,
     readers: *std.ArrayList(*BlockReader),
     stopped: ?*std.atomic.Value(bool),
 ) !void {
-    var writer = BlockWriter.initFromMemTable(self);
     var merger = try BlockMerger.init(alloc, readers);
 
-    self.tableHeader = try merger.merge(alloc, &writer, stopped);
+    self.tableHeader = try merger.merge(alloc, writer, stopped);
     try writer.close(alloc);
 
     if (tablePath.len != 0) {
@@ -144,4 +175,10 @@ fn mergeBlocks(
         const fba = fbaFallback.get();
         try self.tableHeader.writeMeta(fba, tablePath);
     }
+}
+
+pub fn size(self: *MemTable) u64 {
+    return @intCast(
+        self.dataBuf.items.len + self.lensBuf.items.len + self.indexBuf.items.len + self.metaindexBuf.items.len,
+    );
 }

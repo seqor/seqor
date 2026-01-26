@@ -87,7 +87,7 @@ pub fn merge(
             hasNextItem = true;
         }
 
-        const items = reader.block.data.items;
+        const items = reader.block.?.data.items;
         var compareEveryItem = true;
         if (reader.currentI < items.len) {
             const lastItem = items[items.len - 1];
