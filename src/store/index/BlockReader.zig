@@ -97,15 +97,13 @@ pub fn next(self: *BlockReader) !bool {
     if (self.isRead) return false;
 
     if (self.block) |block| {
-        if (self.currentI + 1 < block.data.items.len) {
-            if (block.data.items.len == 0) return false;
-
-            self.isRead = true;
-            return true;
-        }
+        if (block.data.items.len == 0) return false;
+        self.isRead = true;
+        return true;
     }
 
-    unreachable;
+    self.isRead = true;
+    return false;
 }
 
 fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blocksCount: usize) ![]MetaIndexRecord {
@@ -138,4 +136,64 @@ fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blo
     }
 
     return res;
+}
+
+const testing = std.testing;
+
+fn createTestMemBlock(alloc: Allocator, items: []const []const u8) !*MemBlock {
+    var block = try MemBlock.init(alloc, 100);
+    errdefer block.deinit(alloc);
+
+    for (items) |item| {
+        const ok = block.add(item);
+        try testing.expect(ok);
+    }
+
+    return block;
+}
+
+test "BlockReader.blockReaderLessThan compares items correctly" {
+    const alloc = testing.allocator;
+
+    const items1 = [_][]const u8{ "apple", "banana", "cherry" };
+    const items2 = [_][]const u8{ "apricot", "blueberry", "date" };
+
+    const block1 = try createTestMemBlock(alloc, &items1);
+    const block2 = try createTestMemBlock(alloc, &items2);
+
+    var reader1 = try BlockReader.initFromMemBlock(alloc, block1);
+    defer reader1.deinit(alloc);
+
+    var reader2 = try BlockReader.initFromMemBlock(alloc, block2);
+    defer reader2.deinit(alloc);
+
+    // After sorting, "apple" < "apricot"
+    const less = BlockReader.blockReaderLessThan(reader1, reader2);
+    try testing.expect(less);
+    try testing.expect(reader1.currentI == 0);
+    try testing.expect(reader2.currentI == 0);
+}
+
+test "BlockReader.current returns correct item at currentI" {
+    const alloc = testing.allocator;
+
+    const items = [_][]const u8{ "first", "second", "third" };
+
+    const block = try createTestMemBlock(alloc, &items);
+    var reader = try BlockReader.initFromMemBlock(alloc, block);
+    defer reader.deinit(alloc);
+
+    // After sorting, test that current() returns the item at currentI
+    // First item should be "first"
+    const first = reader.current();
+    try testing.expectEqualSlices(u8, "first", first);
+
+    // Manually change currentI and verify current() updates
+    reader.currentI = 1;
+    const second = reader.current();
+    try testing.expectEqualSlices(u8, "second", second);
+
+    reader.currentI = 2;
+    const third = reader.current();
+    try testing.expectEqualSlices(u8, "third", third);
 }
