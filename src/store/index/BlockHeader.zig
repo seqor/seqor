@@ -182,3 +182,60 @@ test "BlockHeader encode/decode" {
         try std.testing.expectEqualDeep(case.bh, decoded.blockHeader);
     }
 }
+
+test "BlockHeader decodeMany" {
+    const allocator = std.testing.allocator;
+
+    const headers = [_]BlockHeader{
+        .{
+            .firstItem = "aaa",
+            .prefix = "a",
+            .encodingType = .plain,
+            .itemsCount = 10,
+            .itemsBlockOffset = 0,
+            .lensBlockOffset = 100,
+            .itemsBlockSize = 50,
+            .lensBlockSize = 25,
+        },
+        .{
+            .firstItem = "bbb",
+            .prefix = "b",
+            .encodingType = .zstd,
+            .itemsCount = 20,
+            .itemsBlockOffset = 200,
+            .lensBlockOffset = 300,
+            .itemsBlockSize = 75,
+            .lensBlockSize = 40,
+        },
+        .{
+            .firstItem = "ccc",
+            .prefix = "c",
+            .encodingType = .plain,
+            .itemsCount = 30,
+            .itemsBlockOffset = 400,
+            .lensBlockOffset = 500,
+            .itemsBlockSize = 100,
+            .lensBlockSize = 60,
+        },
+    };
+
+    var totalSize: usize = 0;
+    for (&headers) |*h| totalSize += h.bound();
+
+    const buf = try allocator.alloc(u8, totalSize);
+    defer allocator.free(buf);
+
+    var offset: usize = 0;
+    for (&headers) |*h| {
+        h.encode(buf[offset..]);
+        offset += h.bound();
+    }
+
+    const decoded = try decodeMany(allocator, buf, headers.len);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqual(headers.len, decoded.len);
+    for (headers, decoded) |expected, actual| {
+        try std.testing.expectEqualDeep(expected, actual);
+    }
+}
