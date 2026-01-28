@@ -205,7 +205,7 @@ pub fn mustReadNextIndexBlock(
     }
     
     // Update bytes read position
-    streamReader.indexBytesRead.* += indexBlockSize;
+    // streamReader.indexBytesRead.* += indexBlockSize;
 }
 
 pub const Error = error{
