@@ -5,6 +5,7 @@ const BlockHeader = @import("block_header.zig").BlockHeader;
 const TableHeader = @import("TableHeader.zig");
 const TableMem = @import("TableMem.zig");
 const BlockData = @import("BlockData.zig").BlockData;
+const ColumnIDGen = @import("ColumnIDGen.zig");
 
 pub const Error = error{
     InvalidBlockOrder,
@@ -32,6 +33,7 @@ pub const StreamReader = struct {
     bloomValuesList: [][]const u8,
     bloomTokensList: [][]const u8,
 
+    columnIDGen: *ColumnIDGen,
     colIdx: *const std.AutoHashMap(u16, u16),
     columnsKeysBuf: []const u8,
     columnIdxsBuf: []const u8,
@@ -61,6 +63,7 @@ pub const StreamReader = struct {
             .bloomValuesList = asReadonly2D(allocator, &tableMem.streamWriter.bloomValuesList),
             .bloomTokensList = asReadonly2D(allocator, &tableMem.streamWriter.bloomTokensList),
 
+            .columnIDGen = &tableMem.streamWriter.columnIDGen,
             .colIdx = &tableMem.streamWriter.colIdx,
             .columnsKeysBuf = tableMem.streamWriter.columnKeysBuf,
             .columnIdxsBuf = tableMem.streamWriter.columnIdxsBuf,

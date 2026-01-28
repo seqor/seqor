@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Encoder = @import("encoding").Encoder;
+const Decoder = @import("encoding").Decoder;
 
 const Self = @This();
 
@@ -44,5 +45,51 @@ inline fn encodeColumnDescs(enc: *Encoder, descs: std.ArrayList(ColumnDesc)) voi
     for (descs.items) |desc| {
         enc.writeVarInt(desc.columndID);
         enc.writeVarInt(desc.offset);
+    }
+}
+
+pub fn decode(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) !*Self {
+    var dec = Decoder.init(src);
+
+    const s = try allocator.create(Self);
+    errdefer allocator.destroy(s);
+
+    s.* = Self{
+        .columns = std.ArrayList(ColumnDesc).empty,
+        .celledColumns = std.ArrayList(ColumnDesc).empty,
+    };
+
+    errdefer {
+        s.columns.deinit(allocator);
+        s.celledColumns.deinit(allocator);
+    }
+
+    try decodeColumnDescs(&dec, allocator, &s.columns);
+    try decodeColumnDescs(&dec, allocator, &s.celledColumns);
+
+    return s;
+}
+
+fn decodeColumnDescs(
+    dec: *Decoder,
+    allocator: std.mem.Allocator,
+    descs: *std.ArrayList(ColumnDesc),
+) !void {
+    const len = try dec.readVarInt(usize);
+
+    try descs.ensureTotalCapacity(allocator, len);
+
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const columndID = try dec.readVarInt(u16);
+        const offset = try dec.readVarInt(usize);
+
+        descs.appendAssumeCapacity(.{
+            .columndID = columndID,
+            .offset = offset,
+        });
     }
 }
