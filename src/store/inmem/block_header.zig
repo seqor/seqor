@@ -89,45 +89,45 @@ pub const BlockHeader = struct {
     }
 
     pub fn decodeFew(
-    dst: *std.ArrayList(BlockHeader),
-    src: []const u8,
-) !void {
-    const dst_len = dst.items.len;
-    var buf = src;
+        dst: *std.ArrayList(BlockHeader),
+        src: []const u8,
+    ) !void {
+        const dst_len = dst.items.len;
+        var buf = src;
 
-    while (buf.len > 0) {
-        const res = BlockHeader.decode(buf);
-        try dst.append(res);
-        buf = buf[encodeExpectedSize..];
+        while (buf.len > 0) {
+            const res = BlockHeader.decode(buf);
+            try dst.append(res);
+            buf = buf[encodeExpectedSize..];
+        }
+
+        try validateBlockHeaders(dst.items[dst_len..]);
     }
 
-    try validateBlockHeaders(dst.items[dst_len..]);
-}
+    pub fn validateBlockHeaders(bhs: []const BlockHeader) !void {
+        if (bhs.len < 2) return;
 
-pub fn validateBlockHeaders(bhs: []const BlockHeader) !void {
-    if (bhs.len < 2) return;
+        var i: usize = 1;
+        while (i < bhs.len) : (i += 1) {
+            const curr = &bhs[i];
+            const prev = &bhs[i - 1];
 
-    var i: usize = 1;
-    while (i < bhs.len) : (i += 1) {
-        const curr = &bhs[i];
-        const prev = &bhs[i - 1];
+            if (curr.sid.less(&prev.sid)) {
+                return error.InvalidBlockHeaderOrder;
+            }
 
-        if (curr.sid.less(&prev.sid)) {
-            return error.InvalidBlockHeaderOrder;
-        }
+            if (!curr.sid.equal(&prev.sid)) {
+                continue;
+            }
 
-        if (!curr.sid.equal(&prev.sid)) {
-            continue;
-        }
+            const th_curr = curr.timestampsHeader;
+            const th_prev = prev.timestampsHeader;
 
-        const th_curr = curr.timestampsHeader;
-        const th_prev = prev.timestampsHeader;
-
-        if (th_curr.min < th_prev.min) {
-            return error.InvalidBlockHeaderTimestampOrder;
+            if (th_curr.min < th_prev.min) {
+                return error.InvalidBlockHeaderTimestampOrder;
+            }
         }
     }
-}
 };
 
 pub const TimestampsHeader = struct {

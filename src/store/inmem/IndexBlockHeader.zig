@@ -158,7 +158,6 @@ fn validateIndexBlockHeaders(headers: []const Self) !void {
     _ = headers;
 }
 
-
 pub fn mustReadNextIndexBlock(
     self: *const Self,
     allocator: std.mem.Allocator,
@@ -166,19 +165,19 @@ pub fn mustReadNextIndexBlock(
     indexBuf: []const u8,
 ) !void {
     const indexBlockSize = self.size;
-    
+
     // Validate indexBlockSize
     if (indexBlockSize > maxIndexBlockSize) {
         std.log.err("FATAL: indexBlockHeader.indexBlockSize={} cannot exceed {} bytes", .{ indexBlockSize, maxIndexBlockSize });
         return error.InvalidIndexBlockSize;
     }
-    
+
     // Validate that offset matches current read position (sequential reading)
     // if (self.offset != streamReader.indexBytesRead.*) {
     //     std.log.err("FATAL: indexBlockHeader.offset={} must equal to {}", .{ self.offset, streamReader.indexBytesRead.* });
     //     return error.InvalidIndexBlockOffset;
     // }
-    
+
     // Bounds checking
     if (self.offset > indexBuf.len) {
         return error.InvalidIndexBlockOffset;
@@ -186,24 +185,24 @@ pub fn mustReadNextIndexBlock(
     if (self.offset + indexBlockSize > indexBuf.len) {
         return error.InvalidIndexBlockData;
     }
-    
+
     // Read compressed data
     const compressed = indexBuf[self.offset..][0..indexBlockSize];
-    
+
     // Get decompressed size
     const decompressedSize = try encoding.getFrameContentSize(compressed);
-    
+
     // Ensure dst has enough capacity
     try dst.ensureTotalCapacity(allocator, decompressedSize);
     dst.items.len = decompressedSize;
-    
+
     // Decompress
     const actualDecompressedSize = try encoding.decompress(dst.items, compressed);
     if (actualDecompressedSize != decompressedSize) {
         std.log.err("FATAL: cannot decompress indexBlock read at offset {} with size {}: decompressed size mismatch", .{ self.offset, indexBlockSize });
         return error.DecompressionSizeMismatch;
     }
-    
+
     // Update bytes read position
     // streamReader.indexBytesRead.* += indexBlockSize;
 }
@@ -214,10 +213,6 @@ pub const Error = error{
     InvalidIndexBlockData,
     DecompressionSizeMismatch,
 };
-
-
-
-
 
 test "IndexBlockHeaderEncode" {
     const Case = struct {

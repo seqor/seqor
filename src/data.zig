@@ -4,6 +4,7 @@ const Conf = @import("conf.zig");
 const Line = @import("store/lines.zig").Line;
 
 const TableMem = @import("store/inmem/TableMem.zig");
+const BlockReader = @import("store/inmem/reader.zig").BlockReader;
 
 const maxLevelSize = 100 * 1024 * 1024 * 1024;
 
@@ -70,7 +71,7 @@ pub const Data = struct {
 
     path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, workersAllocator: std.mem.Allocator, path: []u8) !*Data {
+    pub fn init(allocator: std.mem.Allocator, workersAllocator: std.mem.Allocator, path: []const u8) !*Data {
         const conf = Conf.getConf().server.pools;
         std.debug.assert(conf.cpus != 0);
         // 4 is a minimum amount for workers:
@@ -98,7 +99,7 @@ pub const Data = struct {
         self.* = Data{
             .shards = shards,
             .nextShard = std.atomic.Value(usize).init(0),
-            .nextMergeIdx = std.atomic.Value(usize).init(0),
+            .mergeIdx = std.atomic.Value(usize).init(0),
 
             .mx = .{},
             .memTables = std.ArrayList(*TableMem).empty,
@@ -263,8 +264,8 @@ pub const Data = struct {
         return PartType.inmemory;
     }
 
-    fn getDstPartPath(self: *Data, allocator: std.mem.Allocator, dstPartType: PartType, mergeIdx: usize) []const u8 {
-        var dstPartPath = "";
+    fn getDstPartPath(self: *Data, allocator: std.mem.Allocator, dstPartType: PartType, mergeIdx: usize) ![]const u8 {
+        var dstPartPath: []const u8 = "";
         if (dstPartType != .inmemory) {
             dstPartPath = try std.fmt.allocPrint(
                 allocator,
@@ -283,8 +284,9 @@ pub const Data = struct {
         return std.time.Timer.start() catch unreachable;
     }
 
-    fn openBlockStreamReaders() []*BlockStreamReader {
-        var readers = try allocator.alloc(*BlockStreamReader, count);
+    fn openBlockStreamReaders(allocator: std.mem.Allocator) []*BlockReader {
+        const readers = try allocator.alloc(*BlockReader, 1);
+        return readers;
     }
 
     fn mergeTables(self: *Data, alloc: std.mem.Allocator, tables: []*TableMem, force: bool) void {
@@ -318,12 +320,13 @@ pub const Data = struct {
             .big => {},
         }
         const mergeIdx = self.nextMergeIdx();
-        const dstPathPart = self.getDstPartPath(alloc, dstPartType, mergeIdx);
+        //
+        const dstPathPart = self.getDstPartPath(alloc, dstPartType, mergeIdx) catch std.debug.panic("path problem dstPathPart", .{});
         defer alloc.free(dstPathPart);
 
         // pws[0].mp != nil if we have wrappers
         if (force and tables.len == 1) {
-            tables[0].flushToDisk(alloc, dstPathPart);
+            tables[0].flushToDisk(alloc, dstPathPart) catch std.debug.panic("failed to flush to disk path={s}", .{dstPathPart});
         }
 
         _ = t.lap();
@@ -380,7 +383,8 @@ test "dataWorker" {
     _ = Conf.default();
 
     const alloc = std.testing.allocator;
-    var d = try Data.init(alloc, alloc);
+
+    var d = try Data.init(alloc, alloc, "abc"[0..]);
     std.Thread.sleep(2 * std.time.ns_per_s);
     d.deinit(alloc);
 }

@@ -71,4 +71,3 @@ pub fn encodePrefix(self: *const Self, dst: []u8) void {
     enc.writePadded(self.tenantID, maxTenantIDLen);
     _ = self.tag.encodeIndexTag(enc.buf[enc.offset..]);
 }
-

@@ -183,7 +183,7 @@ pub const Store = struct {
         const indexTable = try IndexTable.init(allocator, 5 * SecNs);
         const index = try Index.init(allocator, indexTable);
 
-        const data = try Data.init(allocator, self.backgroundAllocator);
+        const data = try Data.init(allocator, self.backgroundAllocator, "abc"[0..]);
         // TODO: remove unused parts directories
 
         const cache = try Cache.StreamCache.init(allocator);

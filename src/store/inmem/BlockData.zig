@@ -130,7 +130,6 @@ pub const BlockData = struct {
     }
 };
 
-
 pub const TimestampsData = struct {
     data: []const u8,
 
