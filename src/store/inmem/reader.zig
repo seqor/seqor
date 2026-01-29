@@ -123,7 +123,7 @@ pub const BlockReader = struct {
     globalBlocksCount: u64,
 
     // Block data
-    blockData: *BlockData,
+    blockData: BlockData,
 
     pub fn initFromTableMem(allocator: std.mem.Allocator, tableMem: *TableMem) !*BlockReader {
         const indexBlockHeaders = try IndexBlockHeader.ReadIndexBlockHeaders(allocator, tableMem.streamWriter.metaIndexBuf.items);
@@ -154,7 +154,7 @@ pub const BlockReader = struct {
             .globalRowsCount = 0,
             .globalBlocksCount = 0,
 
-            .blockData = try BlockData.init(allocator),
+            .blockData = try BlockData.initEmpty(),
         };
         return br;
     }
@@ -162,7 +162,7 @@ pub const BlockReader = struct {
     pub fn deinit(self: *BlockReader, allocator: std.mem.Allocator) void {
         self.blockHeaders.deinit(allocator);
         self.streamReader.deinit(allocator);
-        self.blockData.deinit();
+        self.blockData.deinit(allocator);
 
         allocator.destroy(self);
     }
@@ -230,10 +230,7 @@ pub const BlockReader = struct {
         return true;
     }
 
-    /// nextIndexBlock advances to the next index block and loads its block headers.
-    /// Returns false if there are no more index blocks.
     fn nextIndexBlock(self: *BlockReader, allocator: std.mem.Allocator) !bool {
-        // Advance to the next indexBlockHeader
         if (self.nextIndexBlockIdx >= self.indexBlockHeaders.len) {
             // No more blocks left
             // Validate tableHeader
@@ -275,7 +272,7 @@ pub const BlockReader = struct {
 
         // Reset and unmarshal block headers
         self.blockHeaders.clearRetainingCapacity();
-        try unmarshalBlockHeaders(allocator, &self.blockHeaders, indexBlockData, self.tableHeader.version);
+        BlockHeader.decodeFew(&self.blockHeaders, indexBlockData);
 
         self.nextIndexBlockIdx += 1;
         self.nextBlockIdx = 0;
@@ -283,8 +280,6 @@ pub const BlockReader = struct {
     }
 };
 
-
-/// readIndexBlock reads the index block data from the stream reader using the index block header.
 fn readIndexBlock(
     allocator: std.mem.Allocator,
     ih: *const IndexBlockHeader,
@@ -297,63 +292,12 @@ fn readIndexBlock(
     if (ih.offset + ih.size > streamReader.indexBuf.len) {
         return error.InvalidIndexBlockData;
     }
-    
+
     const compressed = streamReader.indexBuf[ih.offset..][0..ih.size];
     const decompressedSize = try @import("encoding").getFrameContentSize(compressed);
-    var decompressed = try allocator.alloc(u8, decompressedSize);
+    const decompressed = try allocator.alloc(u8, decompressedSize);
     errdefer allocator.free(decompressed);
 
     try @import("encoding").decompress(decompressed, compressed);
     return decompressed;
-}
-
-/// unmarshalBlockHeaders unmarshals block headers from the index block data.
-fn unmarshalBlockHeaders(
-    allocator: std.mem.Allocator,
-    blockHeaders: *std.ArrayList(BlockHeader),
-    indexBlockData: []const u8,
-    formatVersion: u8,
-) !void {
-    _ = formatVersion; // TODO: use formatVersion if needed
-
-    var decoder = @import("encoding").Decoder.init(indexBlockData);
-    while (decoder.offset < indexBlockData.len) {
-        // Check if we have enough data for at least the fixed-size parts
-        const remaining = indexBlockData.len - decoder.offset;
-        if (remaining < 32 + 4 + 4 + 33) { // sid + size + len + timestampsHeader minimum
-            if (remaining > 0) {
-                return error.InvalidIndexBlockData;
-            }
-            break;
-        }
-        
-        // Read SID (32 bytes)
-        const sid = SID.decode(decoder.readBytes(32));
-        
-        // Read size and len (fixed 4 bytes each)
-        const size = decoder.readInt(u32);
-        const len = decoder.readInt(u32);
-        
-        // Read timestampsHeader (33 bytes: 4*8 + 1)
-        const timestampsHeader = BlockHeader.TimestampsHeader.decode(&decoder);
-        
-        // Read varints for columns header offsets/sizes
-        const columnsHeaderIndexOffset = decoder.readVarInt();
-        const columnsHeaderIndexSize = decoder.readVarInt();
-        const columnsHeaderOffset = decoder.readVarInt();
-        const columnsHeaderSize = decoder.readVarInt();
-        
-        const header = BlockHeader{
-            .sid = sid,
-            .size = size,
-            .len = len,
-            .timestampsHeader = timestampsHeader,
-            .columnsHeaderOffset = columnsHeaderOffset,
-            .columnsHeaderSize = columnsHeaderSize,
-            .columnsHeaderIndexOffset = columnsHeaderIndexOffset,
-            .columnsHeaderIndexSize = columnsHeaderIndexSize,
-        };
-        
-        try blockHeaders.append(header);
-    }
 }
