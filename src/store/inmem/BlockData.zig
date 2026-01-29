@@ -21,30 +21,48 @@ const maxColumnsHeaderSize = 8 * 1024 * 1024;
 const maxColumnsHeaderIndexSize = 8 * 1024 * 1024;
 
 pub const BlockData = struct {
-    sid: SID,
-    uncompressedSizeBytes: u64,
-    rowsCount: u32,
+    sid: SID = undefined,
+    uncompressedSizeBytes: u64 = 0,
+    rowsCount: u32 = 0,
 
-    timestampsData: TimestampsData,
+    timestampsData: TimestampsData = .{},
     columnsData: std.ArrayList(ColumnData),
-    celledColumns: *const []Column,
+    celledColumns: ?*const []Column = null,
+
+    pub fn initEmpty() BlockData {
+        return .{
+            .columnsData = std.ArrayList(ColumnData).empty,
+        };
+    }
+
+    pub fn reset(self: *BlockData) void {
+        self.sid = undefined;
+        self.uncompressedSizeBytes = 0;
+        self.rowsCount = 0;
+
+        self.timestampsData = .{};
+        self.columnsData.clearRetainingCapacity();
+        self.celledColumns = null;
+    }
 
     pub fn deinit(self: *BlockData, allocator: std.mem.Allocator) void {
         self.columnsData.deinit(allocator);
     }
 
     pub fn readFrom(
+        self: *BlockData,
         allocator: std.mem.Allocator,
         bh: *const BlockHeader,
         sr: *StreamReader,
-    ) !BlockData {
-        const sid = bh.sid;
-        const uncompressedSizeBytes = bh.size;
-        const rowsCount = bh.len;
+    ) !void {
+        self.reset();
 
-        const timestampsData = TimestampsData.mustReadFrom(&bh.timestampsHeader, &sr);
+        self.sid = bh.sid;
+        self.uncompressedSizeBytes = bh.size;
+        self.rowsCount = bh.len;
 
-        // Read columns header
+        self.timestampsData = TimestampsData.readFrom(&bh.timestampsHeader, &sr);
+
         const columnsHeaderSize = bh.columnsHeaderSize;
         if (columnsHeaderSize > maxColumnsHeaderSize) {
             std.log.err(
@@ -54,7 +72,9 @@ pub const BlockData = struct {
             return error.InvalidColumnsHeaderSize;
         }
 
-        if (bh.columnsHeaderOffset + columnsHeaderSize > sr.columnsHeaderBuf.len) {
+        if (bh.columnsHeaderOffset + columnsHeaderSize >
+            sr.columnsHeaderBuf.len)
+        {
             std.log.err(
                 "FATAL: columnsHeaderOffset={} + columnsHeaderSize={} exceeds buffer size: {}",
                 .{ bh.columnsHeaderOffset, columnsHeaderSize, sr.columnsHeaderBuf.len },
@@ -62,8 +82,10 @@ pub const BlockData = struct {
             return error.InvalidColumnsHeaderOffset;
         }
 
-        const columnsHeaderBuf = sr.columnsHeaderBuf[bh.columnsHeaderOffset..][0..columnsHeaderSize];
+        const columnsHeaderBuf =
+            sr.columnsHeaderBuf[bh.columnsHeaderOffset..][0..columnsHeaderSize];
 
+        // --- index ---
         const columnsHeaderIndexSize = bh.columnsHeaderIndexSize;
         if (columnsHeaderIndexSize > maxColumnsHeaderIndexSize) {
             std.log.err(
@@ -83,30 +105,31 @@ pub const BlockData = struct {
 
         const columnsHeaderIndexBuf = sr.columnsHeaderIndexBuf[bh.columnsHeaderIndexOffset..][0..columnsHeaderIndexSize];
 
-        const cshIdx = try ColumnsHeaderIndex.decode(allocator, columnsHeaderIndexBuf);
+        const cshIdx = try ColumnsHeaderIndex.decode(
+            allocator,
+            columnsHeaderIndexBuf,
+        );
         defer cshIdx.deinit(allocator);
 
-        const csh = try ColumnsHeader.decode(allocator, columnsHeaderBuf, &cshIdx, &sr.columnIDGen);
+        const csh = try ColumnsHeader.decode(
+            allocator,
+            columnsHeaderBuf,
+            &cshIdx,
+            &sr.columnIDGen,
+        );
         defer csh.deinit(allocator);
 
-        const columnsData = try std.ArrayList(ColumnData).initCapacity(allocator, csh.headers.len);
+        try self.columnsData.ensureTotalCapacity(allocator, csh.headers.len);
 
         for (csh.headers) |*ch| {
-            const col = try ColumnData.mustReadFrom(ch, &sr);
-            columnsData.appendAssumeCapacity(col);
+            const col = try ColumnData.readFrom(ch, &sr);
+            self.columnsData.appendAssumeCapacity(col);
         }
 
-        return .{
-            .sid = sid,
-            .uncompressedSizeBytes = uncompressedSizeBytes,
-            .rowsCount = rowsCount,
-
-            .timestampsData = timestampsData,
-            .columnsData = columnsData,
-            .celledColumns = &csh.celledColumns,
-        };
+        self.celledColumns = &csh.celledColumns;
     }
 };
+
 
 pub const TimestampsData = struct {
     data: []const u8,
@@ -117,7 +140,7 @@ pub const TimestampsData = struct {
 
     maxTimestamp: u64,
 
-    pub fn mustReadFrom(
+    pub fn readFrom(
         th: *const TimestampsHeader,
         sr: *const StreamReader,
     ) TimestampsData {
@@ -159,7 +182,7 @@ pub const ColumnData = struct {
 
     bloomFilterData: ?[]const u8,
 
-    pub fn mustReadFrom(
+    pub fn readFrom(
         ch: *const ColumnHeader,
         sr: *const StreamReader,
     ) !ColumnData {
