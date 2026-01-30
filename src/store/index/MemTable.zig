@@ -102,10 +102,10 @@ fn setup(self: *MemTable, alloc: Allocator, block: *MemBlock, flushAtUs: i64) !v
     self.blockHeader.encodingType = encodedBlock.encodingType;
 
     self.tableHeader = .{
-        .itemsCount = @intCast(block.data.items.len),
+        .itemsCount = @intCast(block.items.items.len),
         .blocksCount = 1,
-        .firstItem = block.data.items[0],
-        .lastItem = block.data.items[block.data.items.len - 1],
+        .firstItem = block.items.items[0],
+        .lastItem = block.items.items[block.items.items.len - 1],
     };
 
     try self.dataBuf.appendSlice(alloc, sb.itemsData.items);

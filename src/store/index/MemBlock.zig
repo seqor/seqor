@@ -25,12 +25,14 @@ fn findPrefix(first: []const u8, second: []const u8) []const u8 {
 
 const MemBlock = @This();
 
-data: std.ArrayList([]const u8),
+// TODO: rename it, having items.items is not readable
+items: std.ArrayList([]const u8),
 size: u32,
 prefix: []const u8 = "",
 
-// stateBuffer is used for ownership of new record items during the merging,
-stateBuffer: ?std.ArrayList(u8) = null,
+// buf may hold the underlying data memory in order be the memory owner,
+// it happens in reading or merging path when we decode the stored content
+buf: std.ArrayList(u8) = .empty,
 
 pub fn init(
     alloc: Allocator,
@@ -41,28 +43,28 @@ pub fn init(
 
     const b = try alloc.create(MemBlock);
     b.* = .{
-        .data = data,
+        .items = data,
         .size = 0,
     };
     return b;
 }
 
 pub fn deinit(self: *MemBlock, alloc: Allocator) void {
-    self.data.deinit(alloc);
-    if (self.stateBuffer) |*buf| buf.deinit(alloc);
+    self.items.deinit(alloc);
+    self.buf.deinit(alloc);
     alloc.destroy(self);
 }
 
 pub fn reset(self: *MemBlock) void {
-    self.data.clearRetainingCapacity();
+    self.items.clearRetainingCapacity();
     self.size = 0;
     self.prefix = undefined;
 }
 
 pub fn add(self: *MemBlock, entry: []const u8) bool {
-    if ((self.size + entry.len) > self.data.capacity) return false;
+    if ((self.size + entry.len) > self.items.capacity) return false;
 
-    self.data.appendAssumeCapacity(entry);
+    self.items.appendAssumeCapacity(entry);
     self.size += @intCast(entry.len);
     return true;
 }
@@ -76,15 +78,15 @@ pub fn sortData(self: *MemBlock) void {
 }
 
 pub fn setPrefix(self: *MemBlock) void {
-    if (self.data.items.len == 0) return;
+    if (self.items.items.len == 0) return;
 
-    if (self.data.items.len == 1) {
-        self.prefix = self.data.items[0];
+    if (self.items.items.len == 1) {
+        self.prefix = self.items.items[0];
         return;
     }
 
-    var prefix = self.data.items[0];
-    for (self.data.items[1..]) |entry| {
+    var prefix = self.items.items[0];
+    for (self.items.items[1..]) |entry| {
         if (std.mem.startsWith(u8, entry, prefix)) {
             continue;
         }
@@ -96,16 +98,16 @@ pub fn setPrefix(self: *MemBlock) void {
     self.prefix = prefix;
 }
 pub fn setPrefixSorted(self: *MemBlock) void {
-    if (self.data.items.len <= 1) {
+    if (self.items.items.len <= 1) {
         self.prefix = "";
         return;
     }
 
-    self.prefix = findPrefix(self.data.items[0], self.data.items[self.data.items.len - 1]);
+    self.prefix = findPrefix(self.items.items[0], self.items.items[self.items.items.len - 1]);
 }
 
 pub fn sort(self: *MemBlock) void {
-    std.mem.sortUnstable([]const u8, self.data.items, self, memBlockEntryLessThan);
+    std.mem.sortUnstable([]const u8, self.items.items, self, memBlockEntryLessThan);
 }
 
 fn memBlockEntryLessThan(self: *MemBlock, one: []const u8, another: []const u8) bool {
@@ -119,7 +121,7 @@ fn memBlockEntryLessThan(self: *MemBlock, one: []const u8, another: []const u8) 
 
 inline fn assertIsSorted(self: *MemBlock) void {
     if (builtin.is_test) {
-        std.debug.assert(std.sort.isSorted([]const u8, self.data.items, {}, MemOrder(u8).lessThanConst));
+        std.debug.assert(std.sort.isSorted([]const u8, self.items.items, {}, MemOrder(u8).lessThanConst));
     }
 }
 
@@ -128,20 +130,20 @@ pub fn encode(
     alloc: Allocator,
     sb: *StorageBlock,
 ) !EncodedMemBlock {
-    std.debug.assert(self.data.items.len != 0);
+    std.debug.assert(self.items.items.len != 0);
     // this API can't be called on unsorted data
     self.assertIsSorted();
 
     self.setPrefixSorted();
-    const firstItem = self.data.items[0];
+    const firstItem = self.items.items[0];
 
     // TODO: consider making len limit 128
-    if (self.size - self.prefix.len * self.data.items.len < 64 or self.data.items.len < 2) {
+    if (self.size - self.prefix.len * self.items.items.len < 64 or self.items.items.len < 2) {
         try self.encodePlain(alloc, sb);
         return EncodedMemBlock{
             .firstItem = firstItem,
             .prefix = self.prefix,
-            .itemsCount = @intCast(self.data.items.len),
+            .itemsCount = @intCast(self.items.items.len),
             .encodingType = .plain,
         };
     }
@@ -149,14 +151,14 @@ pub fn encode(
     var itemsBuf = std.ArrayList(u8).empty;
     defer itemsBuf.deinit(alloc);
 
-    var lens = try std.ArrayList(u32).initCapacity(alloc, self.data.items.len - 1);
+    var lens = try std.ArrayList(u32).initCapacity(alloc, self.items.items.len - 1);
     defer lens.deinit(alloc);
 
     var prevItem = firstItem[self.prefix.len..];
     var prevLen: u32 = 0;
 
     // write prefix lens
-    for (self.data.items[1..]) |item| {
+    for (self.items.items[1..]) |item| {
         const currItem = item[self.prefix.len..];
         const prefix = findPrefix(prevItem, currItem);
         try itemsBuf.appendSlice(alloc, currItem[prefix.len..]);
@@ -187,7 +189,7 @@ pub fn encode(
     lens.clearRetainingCapacity();
 
     prevLen = @intCast(firstItem.len - self.prefix.len);
-    for (self.data.items[1..]) |item| {
+    for (self.items.items[1..]) |item| {
         const itemLen: u32 = @intCast(item.len - self.prefix.len);
         const xLen = itemLen ^ prevLen;
         prevLen = itemLen;
@@ -211,14 +213,14 @@ pub fn encode(
     // if compressed content is more than 90% of the original size - not worth it
     // TODO: consider tweaking the value up to 80-85%
     if (@as(f64, @floatFromInt(sb.itemsData.items.len)) >
-        0.9 * @as(f64, @floatFromInt(self.size - self.prefix.len * self.data.items.len)))
+        0.9 * @as(f64, @floatFromInt(self.size - self.prefix.len * self.items.items.len)))
     {
         sb.reset();
         try self.encodePlain(alloc, sb);
         return EncodedMemBlock{
             .firstItem = firstItem,
             .prefix = self.prefix,
-            .itemsCount = @intCast(self.data.items.len),
+            .itemsCount = @intCast(self.items.items.len),
             .encodingType = .plain,
         };
     }
@@ -226,7 +228,7 @@ pub fn encode(
     return EncodedMemBlock{
         .firstItem = firstItem,
         .prefix = self.prefix,
-        .itemsCount = @intCast(self.data.items.len),
+        .itemsCount = @intCast(self.items.items.len),
         .encodingType = .zstd,
     };
 }
@@ -234,11 +236,11 @@ pub fn encode(
 fn encodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock) !void {
     try sb.itemsData.ensureUnusedCapacity(
         alloc,
-        self.size - self.prefix.len * self.data.items.len + self.prefix.len - self.data.items[0].len,
+        self.size - self.prefix.len * self.items.items.len + self.prefix.len - self.items.items[0].len,
     );
-    try sb.lensData.ensureUnusedCapacity(alloc, 2 * (self.data.items.len - 1));
+    try sb.lensData.ensureUnusedCapacity(alloc, 2 * (self.items.items.len - 1));
 
-    for (self.data.items[1..]) |item| {
+    for (self.items.items[1..]) |item| {
         const suffix = item[self.prefix.len..];
         sb.itemsData.appendSliceAssumeCapacity(suffix);
     }
@@ -246,42 +248,145 @@ fn encodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock) !void {
     // no chance any len value is larger than 16384 (0x4000)
     const slice = sb.lensData.unusedCapacitySlice();
     var enc = Encoder.init(slice);
-    for (self.data.items[1..]) |item| {
+    for (self.items.items[1..]) |item| {
         const len: u64 = @intCast(item.len - self.prefix.len);
         enc.writeVarInt(len);
     }
     sb.lensData.items.len = enc.offset;
 }
 
-// pub fn decode(
-//     self: *MemBlock,
-//     alloc: Allocator,
-//     sb: *StorageBlock,
-//     firstItem: []const u8,
-//     prefix: []const u8,
-//     itemsCount: u32,
-//     encodingType: EncodingType,
-// ) !void {
-//     std.debug.assert(itemsCount > 0);
-//
-//     self.reset();
-//
-//     self.prefix = prefix;
-//
-//     switch (encodingType) {
-//         .plain => {
-//             try self.decodePlain(alloc, sb, firstItem, itemsCount);
-//             self.assertIsSorted();
-//             return;
-//         },
-//     }
-//
-//
-//     _ = alloc;
-//     _ = sb;
-//     _ = firstItem;
-//     _ = prefix;
-//     _ = itemsCount;
-//     _ = encodingType;
-//     unreachable;
-// }
+pub fn decode(
+    self: *MemBlock,
+    alloc: Allocator,
+    sb: *StorageBlock,
+    firstItem: []const u8,
+    prefix: []const u8,
+    itemsCount: u32,
+    encodingType: EncodingType,
+) !void {
+    std.debug.assert(itemsCount > 0);
+
+    self.reset();
+
+    self.prefix = prefix;
+
+    switch (encodingType) {
+        .plain => {
+            try self.decodePlain(alloc, sb, firstItem, itemsCount);
+            self.assertIsSorted();
+            return;
+        },
+        .zstd => {
+            // implementation is below
+        },
+    }
+
+    const size = try encoding.getFrameContentSize(sb.lensData.items);
+    const decompressedLensBuf = try alloc.alloc(u8, size);
+    defer alloc.free(decompressedLensBuf);
+    const decompressedLensSize = try encoding.decompress(decompressedLensBuf, sb.lensData.items);
+
+    const lensBuf = try alloc.alloc(u64, itemsCount * 2);
+    defer alloc.free(lensBuf);
+    const prefixLens = lensBuf[0..itemsCount];
+    const lens = lensBuf[itemsCount..];
+
+    var fba = std.heap.stackFallback(2048, alloc);
+    const fbaAlloc = fba.get();
+
+    // read prefixes
+    const decodedLens = try fbaAlloc.alloc(u64, itemsCount - 1);
+    defer fbaAlloc.free(decodedLens);
+    var dec = encoding.Decoder.init(decompressedLensBuf[0..decompressedLensSize]);
+    dec.readVarInts(decodedLens);
+
+    // decode prefixes
+    prefixLens[0] = 0;
+    for (0..decodedLens.len) |i| {
+        const xLen = decodedLens[i];
+        prefixLens[i + 1] = xLen ^ prefixLens[i];
+    }
+
+    dec.readVarInts(decodedLens);
+    std.debug.assert(dec.offset == dec.buf.len);
+
+    // decode lens
+    lens[0] = @intCast(firstItem.len - prefix.len);
+    var dataLen: usize = prefix.len * itemsCount + lens[0];
+    for (0..decodedLens.len) |i| {
+        const itemLen = decodedLens[i] ^ lens[i];
+        lens[i + 1] = itemLen;
+        dataLen += @intCast(itemLen);
+    }
+
+    // read items data
+    const decompressedItemsSize = try encoding.getFrameContentSize(sb.itemsData.items);
+    const decompressedItemsBuf = try alloc.alloc(u8, decompressedItemsSize);
+    defer alloc.free(decompressedItemsBuf);
+    const decompressedItemsOffset = try encoding.decompress(decompressedItemsBuf, sb.itemsData.items);
+
+    try self.items.ensureUnusedCapacity(alloc, itemsCount);
+    try self.buf.ensureUnusedCapacity(alloc, dataLen);
+    self.buf.appendSliceAssumeCapacity(firstItem);
+    self.items.appendAssumeCapacity(self.buf.items[0..firstItem.len]);
+
+    var decompressedItemsSlice = decompressedItemsBuf[0..decompressedItemsOffset];
+    var prevItem = self.buf.items[prefix.len..];
+    for (1..itemsCount) |i| {
+        const itemLen = lens[i];
+        const prefixLen = prefixLens[i];
+
+        const suffixLen = itemLen - prefixLen;
+        std.debug.assert(decompressedItemsOffset >= suffixLen);
+        std.debug.assert(prefixLen <= prevItem.len);
+
+        const dataStart = self.buf.items.len;
+        self.buf.appendSliceAssumeCapacity(prefix);
+        self.buf.appendSliceAssumeCapacity(prevItem[0..prefixLen]);
+        self.buf.appendSliceAssumeCapacity(decompressedItemsSlice[0..suffixLen]);
+        self.items.appendAssumeCapacity(self.buf.items[dataStart .. dataStart + self.buf.items.len]);
+
+        decompressedItemsSlice = decompressedItemsSlice[suffixLen..];
+        prevItem = self.buf.items[self.buf.items.len - itemLen ..];
+    }
+
+    std.debug.assert(decompressedItemsSlice.len == 0);
+    std.debug.assert(self.buf.items.len == dataLen);
+    if (builtin.is_test) {
+        self.assertIsSorted();
+    }
+}
+
+pub fn decodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock, firstItem: []const u8, itemsCount: u32) !void {
+    // decode lens
+    const lensBuf = try alloc.alloc(u64, itemsCount);
+    defer alloc.free(lensBuf);
+    lensBuf[0] = firstItem.len - self.prefix.len;
+
+    var dec = encoding.Decoder.init(sb.lensData.items);
+    for (1..itemsCount) |i| {
+        lensBuf[i] = dec.readInt(u64);
+    }
+    std.debug.assert(dec.offset == dec.buf.len);
+
+    // decode items
+    const dataLen: usize = self.prefix.len * (itemsCount - 1) + firstItem.len + sb.itemsData.items.len;
+    try self.buf.ensureUnusedCapacity(alloc, dataLen);
+    self.buf.appendSliceAssumeCapacity(firstItem);
+    self.items.appendAssumeCapacity(self.buf.items[0..firstItem.len]);
+
+    var itemsSlice = sb.itemsData.items;
+    for (1..itemsCount) |i| {
+        const itemLen = lensBuf[i];
+        const start = self.buf.items.len;
+
+        self.buf.appendSliceAssumeCapacity(self.prefix);
+        self.buf.appendSliceAssumeCapacity(
+            sb.itemsData.items[0..itemLen],
+        );
+        self.items.appendAssumeCapacity(self.buf.items[start..self.buf.items.len]);
+        itemsSlice = itemsSlice[itemLen..];
+    }
+    std.debug.assert(itemsSlice.len == 0);
+    std.debug.assert(self.buf.items.len == dataLen);
+}

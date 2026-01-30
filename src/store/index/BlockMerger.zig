@@ -100,7 +100,7 @@ pub fn merge(
             hasNextItem = true;
         }
 
-        const items = reader.block.?.data.items;
+        const items = reader.block.?.items.items;
         var compareEveryItem = true;
         if (reader.currentI < items.len) {
             const lastItem = items[items.len - 1];
@@ -141,7 +141,7 @@ fn flush(
     writer: *BlockWriter,
     tableHeader: *TableHeader,
 ) !void {
-    const items = self.block.data.items;
+    const items = self.block.items.items;
     if (items.len == 0) {
         return;
     }
@@ -150,23 +150,23 @@ fn flush(
     self.lastItem = items[items.len - 1];
     try self.mergeTagsRecords(alloc);
 
-    if (self.block.data.items.len == 0) {
+    if (self.block.items.items.len == 0) {
         // nothing to flush
         return;
     }
 
-    const blockLastItem = self.block.data.items[self.block.data.items.len - 1];
+    const blockLastItem = self.block.items.items[self.block.items.items.len - 1];
 
     // TODO: move this validation to tests and test the block is sorted
-    std.debug.assert(std.mem.order(u8, self.block.data.items[0], self.firstItem) != .lt);
+    std.debug.assert(std.mem.order(u8, self.block.items.items[0], self.firstItem) != .lt);
     std.debug.assert(std.mem.order(u8, blockLastItem, self.lastItem) != .gt);
     if (builtin.is_test) {
-        std.debug.assert(std.sort.isSorted([]const u8, self.block.data.items, {}, MemOrder(u8).lessThanConst));
+        std.debug.assert(std.sort.isSorted([]const u8, self.block.items.items, {}, MemOrder(u8).lessThanConst));
     }
 
-    tableHeader.itemsCount += self.block.data.items.len;
+    tableHeader.itemsCount += self.block.items.items.len;
     if (tableHeader.firstItem.len == 0) {
-        tableHeader.firstItem = self.block.data.items[0];
+        tableHeader.firstItem = self.block.items.items[0];
     }
     tableHeader.lastItem = blockLastItem;
     try writer.writeBlock(alloc, self.block);
@@ -174,7 +174,7 @@ fn flush(
 }
 
 fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
-    const items = self.block.data.items;
+    const items = self.block.items.items;
 
     if (items.len <= 2) {
         return;
@@ -197,15 +197,15 @@ fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
     defer blockCopy.deinit(alloc);
     blockCopy.appendSliceAssumeCapacity(items);
     // can start mutating the original array after copying
-    self.block.data.clearRetainingCapacity();
+    self.block.items.clearRetainingCapacity();
+
     // TODO: tune the capacity to more practical amount
-    if (self.block.stateBuffer == null) {
-        self.block.stateBuffer = try .initCapacity(alloc, 2048);
+    if (self.block.buf.capacity == 0) {
+        try self.block.buf.ensureUnusedCapacity(alloc, 2048);
     } else {
-        // TODO: validate whether its possible
-        self.block.stateBuffer.?.clearRetainingCapacity();
+        self.block.buf.clearRetainingCapacity();
     }
-    const stateBuf = &self.block.stateBuffer.?;
+    const stateBuf = &self.block.buf;
 
     var tagRecordsMerger = try TagRecordsMerger.init(alloc);
     defer tagRecordsMerger.deinit(alloc);
@@ -213,45 +213,43 @@ fn mergeTagsRecords(self: *BlockMerger, alloc: Allocator) !void {
     // use block copy because we override block itself from the beginning
     for (0..blockCopy.items.len) |i| {
         if (items[i].len == 0 or items[i][0] != @intFromEnum(IndexKind.tagToSids) or i == 0 or i == items.len - 1) {
-            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
-            try self.block.data.append(alloc, items[i]);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.items);
+            try self.block.items.append(alloc, items[i]);
             continue;
         }
 
         try tagRecordsMerger.state.setup(items[i]);
         if (tagRecordsMerger.state.streamsLen() > maxStreamsPerRecord) {
-            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
-            try self.block.data.append(alloc, items[i]);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.items);
+            try self.block.items.append(alloc, items[i]);
             continue;
         }
 
         if (!tagRecordsMerger.statesPrefixEqual()) {
-            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.items);
         }
 
         try tagRecordsMerger.state.parseStreamIDs(alloc);
         try tagRecordsMerger.moveParsedState(alloc);
 
         if (tagRecordsMerger.streamIDs.items.len >= maxStreamsPerRecord) {
-            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.data);
+            try tagRecordsMerger.writeState(alloc, stateBuf, &self.block.items);
         }
     }
 
     std.debug.assert(tagRecordsMerger.streamIDs.items.len == 0);
-    const isSorted = std.sort.isSorted([]const u8, self.block.data.items, {}, MemOrder(u8).lessThanConst);
+    const isSorted = std.sort.isSorted([]const u8, self.block.items.items, {}, MemOrder(u8).lessThanConst);
     if (!isSorted) {
         // defend against parallel writing leaving the state unmerged,
         // fallback to the original data
-        self.block.stateBuffer.?.clearRetainingCapacity();
-        self.block.data.clearRetainingCapacity();
-        try self.block.data.ensureUnusedCapacity(alloc, blockCopy.items.len);
-        self.block.data.appendSliceAssumeCapacity(blockCopy.items);
+        self.block.buf.clearRetainingCapacity();
+        self.block.items.clearRetainingCapacity();
+        try self.block.items.ensureUnusedCapacity(alloc, blockCopy.items.len);
+        self.block.items.appendSliceAssumeCapacity(blockCopy.items);
     }
 }
 
-// ============================================================================
 // Tests
-// ============================================================================
 
 const testing = std.testing;
 const SID = @import("../lines.zig").SID;
@@ -467,7 +465,8 @@ test "BlockMerger.merge tag records" {
                         for (entries.items) |entry| a.free(entry);
                         entries.deinit(a);
                     }
-                    entries.appendAssumeCapacity(try TagRecordsMerger.createTagRecord(a, "tenant1", t, &[_]u128{ 100, 200 }));
+                    const entry = try TagRecordsMerger.createTagRecord(a, "tenant1", t, &[_]u128{ 100, 200 });
+                    entries.appendAssumeCapacity(entry);
                     return entries.toOwnedSlice(a);
                 }
             }.f,
