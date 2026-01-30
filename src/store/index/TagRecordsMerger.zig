@@ -14,11 +14,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const encoding = @import("encoding");
-const Encoder = encoding.Encoder;
-
-const maxTenantIDLen = @import("../lines.zig").maxTenantIDLen;
-
 const TagRecordsParseState = @import("TagRecordsParseState.zig");
 
 const Self = @This();
@@ -53,19 +48,19 @@ pub fn writeState(self: *Self, alloc: Allocator, buf: *std.ArrayList(u8), target
     std.mem.sortUnstable(u128, self.streamIDs.items, {}, std.sort.asc(u128));
     self.removeDuplicatedStreams();
 
-    const encodePrefixBound = self.prevState.encodePrefixBound();
-    const bound = encodePrefixBound + self.streamIDs.items.len * maxTenantIDLen;
+    const bound = TagRecordsParseState.encodeRecordBound(self.prevState.tag, self.streamIDs.items.len);
     try buf.ensureUnusedCapacity(alloc, bound);
     const slice = buf.unusedCapacitySlice();
-    self.prevState.encodePrefix(slice);
-    var enc = Encoder.init(slice[encodePrefixBound..]);
-    for (self.streamIDs.items) |sid| {
-        enc.writeInt(u128, sid);
-    }
-    buf.items.len += bound;
+    const recordLen = TagRecordsParseState.encodeRecord(
+        slice,
+        self.prevState.tenantID,
+        self.prevState.tag,
+        self.streamIDs.items,
+    );
+    buf.items.len += recordLen;
 
     self.streamIDs.clearRetainingCapacity();
-    try target.append(alloc, slice[0..bound]);
+    try target.append(alloc, slice[0..recordLen]);
 }
 
 fn removeDuplicatedStreams(self: *Self) void {
@@ -135,33 +130,18 @@ test "removeDuplicatedStreams" {
     }
 }
 
-const IndexKind = @import("Index.zig").IndexKind;
 const Field = @import("../lines.zig").Field;
 
-fn createTagRecord(
+pub fn createTagRecord(
     alloc: Allocator,
     tenantID: []const u8,
     tag: Field,
     streamIDs: []const u128,
 ) ![]const u8 {
-    const bufSize = 1 + 16 + tag.encodeIndexTagBound() + (streamIDs.len * @sizeOf(u128));
+    const bufSize = TagRecordsParseState.encodeRecordBound(tag, streamIDs.len);
     const buf = try alloc.alloc(u8, bufSize);
-
-    buf[0] = @intFromEnum(IndexKind.tagToSids);
-
-    var enc = Encoder.init(buf[1..]);
-    enc.writePadded(tenantID, 16);
-
-    const tagOffset = tag.encodeIndexTag(buf[17..]);
-
-    var offset: usize = 17 + tagOffset;
-    for (streamIDs) |streamID| {
-        var streamEnc = Encoder.init(buf[offset..]);
-        streamEnc.writeInt(u128, streamID);
-        offset += 16;
-    }
-
-    return buf[0..offset];
+    const recordLen = TagRecordsParseState.encodeRecord(buf, tenantID, tag, streamIDs);
+    return buf[0..recordLen];
 }
 
 test "statesPrefixEqual" {

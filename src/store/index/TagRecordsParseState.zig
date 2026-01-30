@@ -110,24 +110,12 @@ test "setup parses tag record" {
     const state = try Self.init(alloc);
     defer state.deinit(alloc);
 
-    // Build a tag record: kind(1) + tenantID(16) + encodedTag + streamIDs
-    var buf: [128]u8 = undefined;
-
-    // Write padded tenant ID
-    var enc = Encoder.init(buf[0..]);
-    enc.writeInt(u8, @intFromEnum(IndexKind.tagToSids));
-    enc.writePadded("tenant1", maxTenantIDLen);
-
-    // Write encoded tag (key + terminator + value + terminator)
     const tag = Field{ .key = "env", .value = "prod" };
-    const tagOffset = tag.encodeIndexTag(enc.buf[enc.offset..]);
-
-    // Write stream IDs (2 streams)
-    var streamEnc = Encoder.init(enc.buf[enc.offset + tagOffset ..]);
-    streamEnc.writeInt(u128, 100);
-    streamEnc.writeInt(u128, 200);
-
-    const totalLen = 1 + maxTenantIDLen + tagOffset + 32;
+    const streamIDs = &[_]u128{ 100, 200 };
+    const bufSize = encodeRecordBound(tag, streamIDs.len);
+    const buf = try alloc.alloc(u8, bufSize);
+    defer alloc.free(buf);
+    const totalLen = encodeRecord(buf, "tenant1", tag, streamIDs);
 
     try state.setup(buf[0..totalLen]);
 
@@ -144,12 +132,11 @@ test "setup parses tag record" {
     try testing.expectEqual(@as(u128, 200), state.streamIDs.items[1]);
 
     // Test encodePrefix
-    const prefixLen = 1 + maxTenantIDLen + tagOffset;
-    const bound = state.encodePrefixBound();
+    const prefixLen = state.encodePrefixBound();
     var outBuf: [128]u8 = undefined;
     state.encodePrefix(&outBuf);
 
-    try testing.expectEqualSlices(u8, buf[0..prefixLen], outBuf[0..bound]);
+    try testing.expectEqualSlices(u8, buf[0..prefixLen], outBuf[0..prefixLen]);
 }
 
 test "parseStreamIDs empty" {
@@ -157,17 +144,12 @@ test "parseStreamIDs empty" {
     const state = try Self.init(alloc);
     defer state.deinit(alloc);
 
-    // Build a tag record with no stream IDs
-    var buf: [64]u8 = undefined;
-    buf[0] = @intFromEnum(IndexKind.tagToSids);
-
-    var enc = Encoder.init(buf[1..]);
-    enc.writePadded("t", maxTenantIDLen);
-
     const tag = Field{ .key = "k", .value = "v" };
-    const tagOffset = tag.encodeIndexTag(enc.buf[enc.offset..]);
-
-    const totalLen = 1 + maxTenantIDLen + tagOffset;
+    const streamIDs = &[_]u128{};
+    const bufSize = encodeRecordBound(tag, streamIDs.len);
+    const buf = try alloc.alloc(u8, bufSize);
+    defer alloc.free(buf);
+    const totalLen = encodeRecord(buf, "t", tag, streamIDs);
 
     try state.setup(buf[0..totalLen]);
     try state.parseStreamIDs(alloc);
