@@ -55,6 +55,7 @@ pub fn deinit(self: *MemBlock, alloc: Allocator) void {
 
 pub fn reset(self: *MemBlock) void {
     self.data.clearRetainingCapacity();
+    self.size = 0;
     self.prefix = undefined;
 }
 
@@ -116,6 +117,12 @@ fn memBlockEntryLessThan(self: *MemBlock, one: []const u8, another: []const u8) 
     return std.mem.lessThan(u8, oneSuffix, anotherSuffix);
 }
 
+inline fn assertIsSorted(self: *MemBlock) void {
+    if (builtin.is_test) {
+        std.debug.assert(std.sort.isSorted([]const u8, self.data.items, {}, MemOrder(u8).lessThanConst));
+    }
+}
+
 pub fn encode(
     self: *MemBlock,
     alloc: Allocator,
@@ -123,9 +130,7 @@ pub fn encode(
 ) !EncodedMemBlock {
     std.debug.assert(self.data.items.len != 0);
     // this API can't be called on unsorted data
-    if (builtin.is_test) {
-        std.debug.assert(std.sort.isSorted([]const u8, self.data.items, {}, MemOrder(u8).lessThanConst));
-    }
+    self.assertIsSorted();
 
     self.setPrefixSorted();
     const firstItem = self.data.items[0];
@@ -248,21 +253,35 @@ fn encodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock) !void {
     sb.lensData.items.len = enc.offset;
 }
 
-pub fn decode(
-    self: *MemBlock,
-    alloc: Allocator,
-    sb: *StorageBlock,
-    firstItem: []const u8,
-    prefix: []const u8,
-    itemsCount: u32,
-    encodingType: EncodingType,
-) !void {
-    _ = self;
-    _ = alloc;
-    _ = sb;
-    _ = firstItem;
-    _ = prefix;
-    _ = itemsCount;
-    _ = encodingType;
-    unreachable;
-}
+// pub fn decode(
+//     self: *MemBlock,
+//     alloc: Allocator,
+//     sb: *StorageBlock,
+//     firstItem: []const u8,
+//     prefix: []const u8,
+//     itemsCount: u32,
+//     encodingType: EncodingType,
+// ) !void {
+//     std.debug.assert(itemsCount > 0);
+//
+//     self.reset();
+//
+//     self.prefix = prefix;
+//
+//     switch (encodingType) {
+//         .plain => {
+//             try self.decodePlain(alloc, sb, firstItem, itemsCount);
+//             self.assertIsSorted();
+//             return;
+//         },
+//     }
+//
+//
+//     _ = alloc;
+//     _ = sb;
+//     _ = firstItem;
+//     _ = prefix;
+//     _ = itemsCount;
+//     _ = encodingType;
+//     unreachable;
+// }

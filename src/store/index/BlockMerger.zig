@@ -1,3 +1,16 @@
+//! BlockMerger: Merges multiple sorted BlockReaders into a single sorted output.
+//!
+//! Use cases:
+//! - SSTable compaction: merging multiple index blocks during LSM-tree compaction
+//! - Flush operations: combining in-memory blocks with on-disk blocks
+//!
+//! Constraints:
+//! - Input BlockReaders must contain sorted data
+//! - Uses a min-heap for k-way merge, O(n log k) complexity
+//! - Automatically merges consecutive tagToSids records with same prefix (tenant+tag)
+//! - Limited to maxStreamsPerRecord (32) stream IDs per merged tag record
+//! - Can be stopped mid-merge via atomic stopped flag
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -344,47 +357,35 @@ fn createSidEntry(alloc: Allocator, tenantID: []const u8, streamID: u128) ![]con
     return buf;
 }
 
-test "BlockMerger.merge basic scenarios" {
+test "BlockMerger.mergeBasicScenarios" {
     const alloc = testing.allocator;
     const maxIndexBlockSize = 1024;
 
     const Case = struct {
         blocks: []const []const []const u8,
-        expectedItemsCount: u64,
-        expectedFirstItem: ?[]const u8,
-        expectedLastItem: ?[]const u8,
+        expectedTableHeader: TableHeader,
     };
 
     const cases = [_]Case{
         .{
             .blocks = &.{},
-            .expectedItemsCount = 0,
-            .expectedFirstItem = null,
-            .expectedLastItem = null,
+            .expectedTableHeader = .{ .itemsCount = 0 },
         },
         .{
             .blocks = &.{&.{ "a", "b", "c" }},
-            .expectedItemsCount = 3,
-            .expectedFirstItem = "a",
-            .expectedLastItem = "c",
+            .expectedTableHeader = .{ .itemsCount = 3, .firstItem = "a", .lastItem = "c" },
         },
         .{
             .blocks = &.{ &.{ "a", "d", "g" }, &.{ "b", "e", "h" }, &.{ "c", "f", "i" } },
-            .expectedItemsCount = 9,
-            .expectedFirstItem = "a",
-            .expectedLastItem = "i",
+            .expectedTableHeader = .{ .itemsCount = 9, .firstItem = "a", .lastItem = "i" },
         },
         .{
             .blocks = &.{ &.{ "a", "b", "c" }, &.{ "x", "y", "z" } },
-            .expectedItemsCount = 6,
-            .expectedFirstItem = "a",
-            .expectedLastItem = "z",
+            .expectedTableHeader = .{ .itemsCount = 6, .firstItem = "a", .lastItem = "z" },
         },
         .{
             .blocks = &.{ &.{ "a", "b", "c" }, &.{ "b", "c", "d" } },
-            .expectedItemsCount = 6,
-            .expectedFirstItem = "a",
-            .expectedLastItem = "d",
+            .expectedTableHeader = .{ .itemsCount = 6, .firstItem = "a", .lastItem = "d" },
         },
     };
 
@@ -403,15 +404,7 @@ test "BlockMerger.merge basic scenarios" {
 
         const tableHeader = try merger.merge(alloc, &writer, null);
 
-        try testing.expectEqual(case.expectedItemsCount, tableHeader.itemsCount);
-
-        if (case.expectedFirstItem) |expected| {
-            try testing.expectEqualStrings(expected, tableHeader.firstItem);
-        }
-
-        if (case.expectedLastItem) |expected| {
-            try testing.expectEqualStrings(expected, tableHeader.lastItem);
-        }
+        try testing.expectEqual(case.expectedTableHeader, tableHeader);
     }
 }
 

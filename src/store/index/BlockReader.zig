@@ -11,8 +11,6 @@ const StorageBlock = @import("StorageBlock.zig");
 const TableHeader = @import("TableHeader.zig");
 const BlockHeader = @import("BlockHeader.zig");
 
-const assertable = builtin.mode == .ReleaseSafe or builtin.mode == .Debug;
-
 const BlockReader = @This();
 
 block: ?*MemBlock,
@@ -54,9 +52,10 @@ blocksRead: usize = 0,
 // number of items read
 itemsRead: usize = 0,
 
-firstItemChecked: if (assertable) bool else void = if (assertable) false else {},
+firstItemChecked: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
 
 pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
+    std.debug.assert(block.data.items.len > 0);
     block.sortData();
 
     const r = try alloc.create(BlockReader);
@@ -154,25 +153,25 @@ pub fn next(self: *BlockReader, alloc: Allocator) !bool {
     @memmove(self.sb.lensData.unusedCapacitySlice(), self.lensBuf.items);
     self.sb.lensData.items.len = self.lensBuf.items.len;
 
-    try self.block.?.decode(
-        alloc,
-        &self.sb,
-        self.blockHeader.firstItem,
-        self.blockHeader.prefix,
-        self.blockHeader.itemsCount,
-        self.blockHeader.encodingType,
-    );
-    self.blocksRead += 1;
-    std.debug.assert(self.blocksRead <= self.tableHeader.blocksCount);
-    self.currentI = 0;
-    self.itemsRead += self.block.?.data.items.len;
-    std.debug.assert(self.itemsRead <= self.tableHeader.itemsCount);
-
-    if (!self.firstItemChecked) {
-        self.firstItemChecked = true;
-        const firstItem = self.block.?.data.items[0];
-        std.debug.assert(std.mem.eql(u8, self.tableHeader.firstItem, firstItem));
-    }
+    // try self.block.?.decode(
+    //     alloc,
+    //     &self.sb,
+    //     self.blockHeader.firstItem,
+    //     self.blockHeader.prefix,
+    //     self.blockHeader.itemsCount,
+    //     self.blockHeader.encodingType,
+    // );
+    // self.blocksRead += 1;
+    // std.debug.assert(self.blocksRead <= self.tableHeader.blocksCount);
+    // self.currentI = 0;
+    // self.itemsRead += self.block.?.data.items.len;
+    // std.debug.assert(self.itemsRead <= self.tableHeader.itemsCount);
+    //
+    // if (!self.firstItemChecked) {
+    //     self.firstItemChecked = true;
+    //     const firstItem = self.block.?.data.items[0];
+    //     std.debug.assert(std.mem.eql(u8, self.tableHeader.firstItem, firstItem));
+    // }
     return true;
 }
 

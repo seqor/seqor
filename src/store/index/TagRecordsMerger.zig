@@ -1,3 +1,16 @@
+/// TagRecordsMerger: Merges consecutive tagToSids index records with the same prefix.
+///
+/// Use cases:
+/// - Compacting inverted index entries: multiple (tenant:tag -> streamID) records
+///   are merged into a single (tenant:tag -> [streamIDs]) record
+/// - Reducing index size by deduplicating stream IDs
+///
+/// Constraints:
+/// - Operates on sorted input; records must be processed in order
+/// - Uses two TagRecordsParseState instances for comparing consecutive records
+/// - Output streamIDs are sorted and deduplicated
+/// - Caller must call writeState() before switching to a different prefix
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -119,5 +132,179 @@ test "removeDuplicatedStreams" {
         m.removeDuplicatedStreams();
 
         try testing.expectEqualSlices(u128, m.streamIDs.items, case.expected);
+    }
+}
+
+const IndexKind = @import("Index.zig").IndexKind;
+const Field = @import("../lines.zig").Field;
+
+fn createTagRecord(
+    alloc: Allocator,
+    tenantID: []const u8,
+    tag: Field,
+    streamIDs: []const u128,
+) ![]const u8 {
+    const bufSize = 1 + 16 + tag.encodeIndexTagBound() + (streamIDs.len * @sizeOf(u128));
+    const buf = try alloc.alloc(u8, bufSize);
+
+    buf[0] = @intFromEnum(IndexKind.tagToSids);
+
+    var enc = Encoder.init(buf[1..]);
+    enc.writePadded(tenantID, 16);
+
+    const tagOffset = tag.encodeIndexTag(buf[17..]);
+
+    var offset: usize = 17 + tagOffset;
+    for (streamIDs) |streamID| {
+        var streamEnc = Encoder.init(buf[offset..]);
+        streamEnc.writeInt(u128, streamID);
+        offset += 16;
+    }
+
+    return buf[0..offset];
+}
+
+test "statesPrefixEqual" {
+    const Case = struct {
+        tenantA: []const u8,
+        tenantB: []const u8,
+        tagA: Field,
+        tagB: Field,
+        expected: bool,
+    };
+    const cases = [_]Case{
+        .{
+            .tenantA = "tenant1",
+            .tenantB = "tenant1",
+            .tagA = .{ .key = "env", .value = "prod" },
+            .tagB = .{ .key = "env", .value = "prod" },
+            .expected = true,
+        },
+        .{
+            .tenantA = "tenant1",
+            .tenantB = "tenant2",
+            .tagA = .{ .key = "env", .value = "prod" },
+            .tagB = .{ .key = "env", .value = "prod" },
+            .expected = false,
+        },
+        .{
+            .tenantA = "tenant1",
+            .tenantB = "tenant1",
+            .tagA = .{ .key = "env", .value = "prod" },
+            .tagB = .{ .key = "env", .value = "dev" },
+            .expected = false,
+        },
+    };
+
+    for (cases) |case| {
+        const alloc = testing.allocator;
+        var m = try Self.init(alloc);
+        defer m.deinit(alloc);
+
+        const record1 = try createTagRecord(alloc, case.tenantA, case.tagA, &[_]u128{100});
+        defer alloc.free(record1);
+        const record2 = try createTagRecord(alloc, case.tenantB, case.tagB, &[_]u128{200});
+        defer alloc.free(record2);
+
+        try m.state.setup(record1);
+        try m.prevState.setup(record2);
+
+        try testing.expectEqual(case.expected, m.statesPrefixEqual());
+    }
+}
+
+test "moveParsedState" {
+    const alloc = testing.allocator;
+    var m = try Self.init(alloc);
+    defer m.deinit(alloc);
+
+    const tag = Field{ .key = "app", .value = "web" };
+    const streamIDs = &[_]u128{ 100, 200, 300 };
+    const record = try createTagRecord(alloc, "tenant1", tag, streamIDs);
+    defer alloc.free(record);
+
+    try m.state.setup(record);
+    try m.state.parseStreamIDs(alloc);
+
+    const origState = m.state;
+    const origPrevState = m.prevState;
+
+    try m.moveParsedState(alloc);
+
+    // streamIDs should be moved to merger
+    try testing.expectEqual(@as(usize, 3), m.streamIDs.items.len);
+    try testing.expectEqualSlices(u128, streamIDs, m.streamIDs.items);
+
+    // states should be swapped
+    try testing.expectEqual(origPrevState, m.state);
+    try testing.expectEqual(origState, m.prevState);
+}
+
+test "writeState empty" {
+    const alloc = testing.allocator;
+    var m = try Self.init(alloc);
+    defer m.deinit(alloc);
+
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(alloc);
+    var target = std.ArrayList([]const u8){};
+    defer target.deinit(alloc);
+
+    try m.writeState(alloc, &buf, &target);
+
+    try testing.expectEqual(@as(usize, 0), target.items.len);
+}
+
+test "writeState" {
+    const alloc = testing.allocator;
+
+    const Case = struct {
+        tag: Field,
+        recordStreamIDs: []const u128,
+        initial: []const u128,
+        expected: []const u128,
+    };
+
+    const cases = [_]Case{
+        .{
+            .tag = Field{ .key = "region", .value = "eu" },
+            .recordStreamIDs = &[_]u128{ 300, 100, 200 },
+            .initial = &[_]u128{ 300, 100, 200 },
+            .expected = &[_]u128{ 100, 200, 300 },
+        },
+        .{
+            .tag = Field{ .key = "env", .value = "prod" },
+            .recordStreamIDs = &[_]u128{1},
+            .initial = &[_]u128{ 50, 10, 10, 30, 50, 20 },
+            .expected = &[_]u128{ 10, 20, 30, 50 },
+        },
+    };
+
+    for (cases) |case| {
+        var m = try Self.init(alloc);
+        defer m.deinit(alloc);
+
+        const record = try createTagRecord(alloc, "tenant1", case.tag, case.recordStreamIDs);
+        defer alloc.free(record);
+
+        try m.prevState.setup(record);
+        try m.streamIDs.appendSlice(alloc, case.initial);
+
+        var buf = std.ArrayList(u8){};
+        defer buf.deinit(alloc);
+        var target = std.ArrayList([]const u8){};
+        defer target.deinit(alloc);
+
+        try m.writeState(alloc, &buf, &target);
+
+        try testing.expectEqual(@as(usize, 1), target.items.len);
+        try testing.expectEqual(@as(usize, 0), m.streamIDs.items.len);
+
+        var verifyState = try TagRecordsParseState.init(alloc);
+        defer verifyState.deinit(alloc);
+        try verifyState.setup(target.items[0]);
+        try verifyState.parseStreamIDs(alloc);
+
+        try testing.expectEqualSlices(u128, case.expected, verifyState.streamIDs.items);
     }
 }

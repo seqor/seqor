@@ -61,8 +61,6 @@ Nice to have:
 - mem table
 - meta index
 - table header
-- tag merger
-- tag state
 - meta index record
 
 ##### data
