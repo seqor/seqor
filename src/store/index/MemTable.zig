@@ -42,7 +42,7 @@ pub fn init(alloc: Allocator, blocks: []*MemBlock) !*MemTable {
         for (readers.items) |reader| reader.deinit(alloc);
         readers.deinit(alloc);
     }
-    const t = try alloc.create(MemTable);
+    const t = try empty(alloc);
     errdefer alloc.destroy(t);
 
     if (blocks.len == 1) {
@@ -74,7 +74,7 @@ pub fn mergeTables(alloc: Allocator, memTables: []*MemTable) !*MemTable {
         const reader = try BlockReader.initFromMemTable(alloc, table);
         readers.appendAssumeCapacity(reader);
     }
-    const t = try alloc.create(MemTable);
+    const t = try empty(alloc);
     errdefer alloc.destroy(t);
 
     const flushToDiskAtUs = flush.getFlushToDiskDeadline(memTables);
@@ -95,6 +95,7 @@ fn setup(self: *MemTable, alloc: Allocator, block: *MemBlock, flushAtUs: i64) !v
     self.flushAtUs = flushAtUs;
 
     var sb = StorageBlock{};
+    defer sb.deinit(alloc);
     const encodedBlock = try block.encode(alloc, &sb);
     self.blockHeader.firstItem = encodedBlock.firstItem;
     self.blockHeader.prefix = encodedBlock.prefix;
@@ -121,6 +122,7 @@ fn setup(self: *MemTable, alloc: Allocator, block: *MemBlock, flushAtUs: i64) !v
 
     var bound = try encoding.compressBound(encodedBlockHeader.len);
     const compressed = try alloc.alloc(u8, bound);
+    defer alloc.free(compressed);
     var n = try encoding.compressAuto(compressed, encodedBlockHeader);
     try self.indexBuf.appendSlice(alloc, compressed[0..n]);
 

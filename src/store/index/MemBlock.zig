@@ -365,12 +365,13 @@ pub fn decodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock, firstIt
 
     var dec = encoding.Decoder.init(sb.lensData.items);
     for (1..itemsCount) |i| {
-        lensBuf[i] = dec.readInt(u64);
+        lensBuf[i] = dec.readVarInt();
     }
     std.debug.assert(dec.offset == dec.buf.len);
 
     // decode items
     const dataLen: usize = self.prefix.len * (itemsCount - 1) + firstItem.len + sb.itemsData.items.len;
+    try self.items.ensureUnusedCapacity(alloc, itemsCount);
     try self.buf.ensureUnusedCapacity(alloc, dataLen);
     self.buf.appendSliceAssumeCapacity(firstItem);
     self.items.appendAssumeCapacity(self.buf.items[0..firstItem.len]);
@@ -381,9 +382,7 @@ pub fn decodePlain(self: *MemBlock, alloc: Allocator, sb: *StorageBlock, firstIt
         const start = self.buf.items.len;
 
         self.buf.appendSliceAssumeCapacity(self.prefix);
-        self.buf.appendSliceAssumeCapacity(
-            sb.itemsData.items[0..itemLen],
-        );
+        self.buf.appendSliceAssumeCapacity(itemsSlice[0..itemLen]);
         self.items.appendAssumeCapacity(self.buf.items[start..self.buf.items.len]);
         itemsSlice = itemsSlice[itemLen..];
     }

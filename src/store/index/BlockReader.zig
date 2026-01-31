@@ -13,6 +13,9 @@ const BlockHeader = @import("BlockHeader.zig");
 
 const BlockReader = @This();
 
+// TODO: make it non optional, it was historically optional
+// to show mem block is not owned on decoding it from mem table,
+// but apparently it's owning
 block: ?*MemBlock,
 tableHeader: TableHeader,
 
@@ -74,16 +77,21 @@ pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
 }
 
 pub fn initFromMemTable(alloc: Allocator, memTable: *MemTable) !*BlockReader {
+    std.debug.assert(memTable.tableHeader.blocksCount > 0);
     const metaIndexRecords = try decodeMetaIndexRecords(
         alloc,
         memTable.metaindexBuf,
         memTable.tableHeader.blocksCount,
     );
+    errdefer alloc.free(metaIndexRecords);
+
+    const block = try MemBlock.init(alloc, @intCast(memTable.tableHeader.itemsCount));
+    errdefer block.deinit(alloc);
 
     const r = try alloc.create(BlockReader);
+    errdefer alloc.destroy(r);
     r.* = .{
-        // TODO: find an easy way to deinit it and metaIndexRecords
-        .block = null,
+        .block = block,
         .metaIndexRecords = metaIndexRecords,
         .tableHeader = memTable.tableHeader,
         .indexBuf = memTable.indexBuf,
@@ -102,9 +110,10 @@ pub fn deinit(self: *BlockReader, alloc: Allocator) void {
     if (self.block) |block| block.deinit(alloc);
 
     if (self.metaIndexRecords.len > 0) alloc.free(self.metaIndexRecords);
-    self.indexBuf.deinit(alloc);
-    self.dataBuf.deinit(alloc);
-    self.lensBuf.deinit(alloc);
+    if (self.blockHeaders.len > 0) alloc.free(self.blockHeaders);
+    self.sb.deinit(alloc);
+    self.compressedBuf.deinit(alloc);
+    self.uncompressedBuf.deinit(alloc);
 
     alloc.destroy(self);
 }
@@ -122,13 +131,14 @@ pub inline fn current(self: *BlockReader) []const u8 {
 pub fn next(self: *BlockReader, alloc: Allocator) !bool {
     if (self.isRead) return false;
 
-    if (self.block) |block| {
-        if (block.items.items.len == 0) return false;
+    // TODO: perhaps it's worth adding read mode enum to show
+    // we either read from mem block or decoding from mem table
+    if (self.metaIndexRecords.len == 0) {
         self.isRead = true;
         return true;
     }
 
-    if (self.blockHeaderI >= self.tableHeader.blocksCount) {
+    if (self.blockHeaders.len == 0 or self.blockHeaderI >= self.blockHeaders.len) {
         const ok = try self.readNextBlockHeaders(alloc);
         if (!ok) {
             const lastItem = self.block.?.items.items[self.block.?.items.items.len - 1];
@@ -145,12 +155,14 @@ pub fn next(self: *BlockReader, alloc: Allocator) !bool {
     // for a file reader we must just read the content
     self.sb.itemsData.clearRetainingCapacity();
     try self.sb.itemsData.ensureUnusedCapacity(alloc, self.blockHeader.itemsBlockSize);
-    @memmove(self.sb.itemsData.unusedCapacitySlice(), self.dataBuf.items);
+    const itemsDest = self.sb.itemsData.unusedCapacitySlice()[0..self.blockHeader.itemsBlockSize];
+    @memmove(itemsDest, self.dataBuf.items);
     self.sb.itemsData.items.len = self.dataBuf.items.len;
 
     self.sb.lensData.clearRetainingCapacity();
     try self.sb.lensData.ensureUnusedCapacity(alloc, self.blockHeader.lensBlockSize);
-    @memmove(self.sb.lensData.unusedCapacitySlice(), self.lensBuf.items);
+    const lensDest = self.sb.lensData.unusedCapacitySlice()[0..self.blockHeader.lensBlockSize];
+    @memmove(lensDest, self.lensBuf.items);
     self.sb.lensData.items.len = self.lensBuf.items.len;
 
     try self.block.?.decode(
@@ -185,7 +197,8 @@ fn readNextBlockHeaders(self: *BlockReader, alloc: Allocator) !bool {
 
     self.compressedBuf.clearRetainingCapacity();
     try self.compressedBuf.ensureUnusedCapacity(alloc, mi.indexBlockSize);
-    @memmove(self.compressedBuf.unusedCapacitySlice(), self.indexBuf.items);
+    const indexDest = self.compressedBuf.unusedCapacitySlice()[0..mi.indexBlockSize];
+    @memmove(indexDest, self.indexBuf.items);
     self.compressedBuf.items.len = self.indexBuf.items.len;
 
     self.uncompressedBuf.clearRetainingCapacity();
@@ -206,11 +219,14 @@ fn readNextBlockHeaders(self: *BlockReader, alloc: Allocator) !bool {
 fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blocksCount: usize) ![]MetaIndexRecord {
     const decomporessedSize = try encoding.getFrameContentSize(metaindexBuf.items);
     const buf = try alloc.alloc(u8, decomporessedSize);
+    defer alloc.free(buf);
     const bufOffset = try encoding.decompress(buf, metaindexBuf.items);
 
-    const res = try alloc.alloc(MetaIndexRecord, blocksCount);
+    const records = try alloc.alloc(MetaIndexRecord, blocksCount);
+    errdefer alloc.free(records);
+
     var slice = buf[0..bufOffset];
-    var i: usize = 0;
+    var i: u32 = 0;
     while (slice.len > 0) {
         // TODO: test if holding them on heap is better,
         // 1. create a mem pool to pop the objects quickly
@@ -223,16 +239,16 @@ fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blo
         };
         const n = rec.decode(slice);
         slice = slice[n..];
-        res[i] = rec;
+        records[i] = rec;
         i += 1;
     }
 
-    std.debug.assert(i + 1 == blocksCount);
+    std.debug.assert(i == blocksCount);
     if (builtin.is_test) {
-        std.debug.assert(std.sort.isSorted(MetaIndexRecord, res, {}, MetaIndexRecord.lessThan));
+        std.debug.assert(std.sort.isSorted(MetaIndexRecord, records, {}, MetaIndexRecord.lessThan));
     }
 
-    return res;
+    return records;
 }
 
 const testing = std.testing;
@@ -293,4 +309,31 @@ test "BlockReader.current returns correct item at currentI" {
     reader.currentI = 2;
     const third = reader.current();
     try testing.expectEqualSlices(u8, "third", third);
+}
+
+test "BlockReader.initFromMemTable reads items" {
+    const alloc = testing.allocator;
+
+    const items = [_][]const u8{ "alpha", "beta", "delta" };
+
+    const block = try createTestMemBlock(alloc, &items);
+    defer block.deinit(alloc);
+
+    var blocks = [_]*MemBlock{block};
+    var memTable = try MemTable.init(alloc, &blocks);
+    defer memTable.deinit(alloc);
+
+    var reader = try BlockReader.initFromMemTable(alloc, memTable);
+    defer reader.deinit(alloc);
+
+    try testing.expect(try reader.next(alloc));
+    try testing.expect(reader.block != null);
+
+    const decoded = reader.block.?.items.items;
+    try testing.expectEqual(items.len, decoded.len);
+    for (items, 0..) |item, i| {
+        try testing.expectEqualSlices(u8, item, decoded[i]);
+    }
+
+    try testing.expect(!try reader.next(alloc));
 }
