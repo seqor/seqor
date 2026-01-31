@@ -96,9 +96,9 @@ pub fn decode(buf: []const u8) Self {
     };
 }
 
-pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) Self {
+pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) !Self {
     var decoder = Decoder.init(buf);
-    const sid = SID.decodeAlloc(allocator, buf);
+    const sid = try SID.decodeAlloc(allocator, buf);
     decoder.offset = 32; // SID is 32 bytes
     const minTs = decoder.readInt(u64);
     const maxTs = decoder.readInt(u64);
@@ -123,7 +123,8 @@ pub fn ReadIndexBlockHeaders(
     var decompressed = try allocator.alloc(u8, decompressedSize);
     defer allocator.free(decompressed);
 
-    try encoding.decompress(
+    // TODO add additional asserts
+    _ = try encoding.decompress(
         decompressed,
         compressed,
     );
@@ -137,7 +138,7 @@ pub fn ReadIndexBlockHeaders(
     var dst = try allocator.alloc(Self, count);
     var i: usize = 0;
     errdefer {
-        for (dst[0..i]) |reader| reader.deinitSIDAlloc(allocator);
+        for (dst[0..i]) |*reader| reader.deinitSIDAlloc(allocator);
         allocator.free(dst);
     }
 
@@ -146,7 +147,7 @@ pub fn ReadIndexBlockHeaders(
         off += encodeExpectedSize;
         i += 1;
     }) {
-        dst[i] = decodeAlloc(allocator, decompressed[off .. off + encodeExpectedSize]);
+        dst[i] = try decodeAlloc(allocator, decompressed[off .. off + encodeExpectedSize]);
     }
 
     try validateIndexBlockHeaders(dst);
@@ -155,6 +156,7 @@ pub fn ReadIndexBlockHeaders(
 }
 
 fn validateIndexBlockHeaders(headers: []const Self) !void {
+    // TODO: implement it
     _ = headers;
 }
 

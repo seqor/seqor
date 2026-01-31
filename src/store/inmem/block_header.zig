@@ -89,6 +89,7 @@ pub const BlockHeader = struct {
     }
 
     pub fn decodeFew(
+        allocator: std.mem.Allocator,
         dst: *std.ArrayList(BlockHeader),
         src: []const u8,
     ) !void {
@@ -97,7 +98,7 @@ pub const BlockHeader = struct {
 
         while (buf.len > 0) {
             const res = BlockHeader.decode(buf);
-            try dst.append(res);
+            try dst.append(allocator, res);
             buf = buf[encodeExpectedSize..];
         }
 
@@ -112,11 +113,11 @@ pub const BlockHeader = struct {
             const curr = &bhs[i];
             const prev = &bhs[i - 1];
 
-            if (curr.sid.less(&prev.sid)) {
+            if (curr.sid.lessThan(&prev.sid)) {
                 return error.InvalidBlockHeaderOrder;
             }
 
-            if (!curr.sid.equal(&prev.sid)) {
+            if (!curr.sid.eql(&prev.sid)) {
                 continue;
             }
 

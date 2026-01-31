@@ -33,7 +33,7 @@ pub const StreamReader = struct {
     bloomValuesList: [][]const u8,
     bloomTokensList: [][]const u8,
 
-    columnIDGen: *ColumnIDGen,
+    columnIDGen: *const ColumnIDGen,
     colIdx: *const std.AutoHashMap(u16, u16),
     columnsKeysBuf: []const u8,
     columnIdxsBuf: []const u8,
@@ -60,13 +60,13 @@ pub const StreamReader = struct {
 
             .messageBloomValuesBuf = tableMem.streamWriter.messageBloomValuesBuf.items,
             .messageBloomTokensBuf = tableMem.streamWriter.messageBloomTokensBuf.items,
-            .bloomValuesList = asReadonly2D(allocator, &tableMem.streamWriter.bloomValuesList),
-            .bloomTokensList = asReadonly2D(allocator, &tableMem.streamWriter.bloomTokensList),
+            .bloomValuesList = try asReadonly2D(allocator, &tableMem.streamWriter.bloomValuesList),
+            .bloomTokensList = try asReadonly2D(allocator, &tableMem.streamWriter.bloomTokensList),
 
-            .columnIDGen = &tableMem.streamWriter.columnIDGen,
+            .columnIDGen = tableMem.streamWriter.columnIDGen,
             .colIdx = &tableMem.streamWriter.colIdx,
-            .columnsKeysBuf = tableMem.streamWriter.columnKeysBuf,
-            .columnIdxsBuf = tableMem.streamWriter.columnIdxsBuf,
+            .columnsKeysBuf = tableMem.streamWriter.columnKeysBuf.items,
+            .columnIdxsBuf = tableMem.streamWriter.columnIdxsBuf.items,
         };
         return r;
     }
@@ -154,7 +154,7 @@ pub const BlockReader = struct {
             .globalRowsCount = 0,
             .globalBlocksCount = 0,
 
-            .blockData = try BlockData.initEmpty(),
+            .blockData = BlockData.initEmpty(),
         };
         return br;
     }
@@ -272,7 +272,7 @@ pub const BlockReader = struct {
 
         // Reset and unmarshal block headers
         self.blockHeaders.clearRetainingCapacity();
-        BlockHeader.decodeFew(&self.blockHeaders, indexBlockData);
+        try BlockHeader.decodeFew(allocator, &self.blockHeaders, indexBlockData);
 
         self.nextIndexBlockIdx += 1;
         self.nextBlockIdx = 0;
@@ -298,6 +298,77 @@ fn readIndexBlock(
     const decompressed = try allocator.alloc(u8, decompressedSize);
     errdefer allocator.free(decompressed);
 
-    try @import("encoding").decompress(decompressed, compressed);
+    _ = try @import("encoding").decompress(decompressed, compressed);
     return decompressed;
+}
+
+const Line = @import("../lines.zig").Line;
+const Field = @import("../lines.zig").Field;
+
+const SampleLines = struct {
+    fields1: [2]Field,
+    fields2: [2]Field,
+    lines: [3]Line,
+};
+
+fn populateSampleLines(sample: *SampleLines) void {
+    sample.fields1 = .{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    sample.fields2 = .{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    sample.lines = .{
+        .{
+            .timestampNs = 1,
+            .sid = .{ .id = 2, .tenantID = "2222" },
+            .fields = sample.fields1[0..],
+        },
+        .{
+            .timestampNs = 2,
+            .sid = .{ .id = 1, .tenantID = "1111" },
+            .fields = sample.fields2[0..],
+        },
+        .{
+            .timestampNs = 3,
+            .sid = .{ .id = 1, .tenantID = "1111" },
+            .fields = sample.fields2[0..],
+        },
+    };
+}
+
+test "readBlock reads buffers" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testReadBlock, .{});
+}
+
+fn testReadBlock(allocator: std.mem.Allocator) !void {
+    var sample: SampleLines = SampleLines{
+        .fields1 = undefined,
+        .fields2 = undefined,
+        .lines = undefined,
+    };
+    populateSampleLines(&sample);
+
+    // unordered timestamps in lines so that it tests its sorting
+    var lines = [3]*const Line{
+        &sample.lines[0],
+        &sample.lines[1],
+        &sample.lines[2],
+    };
+
+    const memTable = try TableMem.init(allocator);
+    defer memTable.deinit(allocator);
+    try memTable.addLines(allocator, lines[0..]);
+
+    const blockReader = try BlockReader.initFromTableMem(allocator, memTable);
+
+    var i: u32 = 0;
+    while (try blockReader.NextBlock(allocator)) {
+        i += 1;
+    }
+
+    try std.testing.expectEqual(3, i);
+    try std.testing.expectEqual(1, 1);
 }

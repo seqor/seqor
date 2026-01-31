@@ -40,7 +40,7 @@ pub const SID = struct {
         };
     }
 
-    pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) SID {
+    pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) !SID {
         const tenantID = try allocator.alloc(u8, maxTenantIDLen);
 
         var decoder = Decoder.init(buf);

@@ -54,18 +54,8 @@ pub fn decode(
 ) !*Self {
     var dec = Decoder.init(src);
 
-    const s = try allocator.create(Self);
-    errdefer allocator.destroy(s);
-
-    s.* = Self{
-        .columns = std.ArrayList(ColumnDesc).empty,
-        .celledColumns = std.ArrayList(ColumnDesc).empty,
-    };
-
-    errdefer {
-        s.columns.deinit(allocator);
-        s.celledColumns.deinit(allocator);
-    }
+    const s = try Self.init(allocator);
+    errdefer s.deinit(allocator);
 
     try decodeColumnDescs(&dec, allocator, &s.columns);
     try decodeColumnDescs(&dec, allocator, &s.celledColumns);
@@ -78,18 +68,47 @@ fn decodeColumnDescs(
     allocator: std.mem.Allocator,
     descs: *std.ArrayList(ColumnDesc),
 ) !void {
-    const len = try dec.readVarInt(usize);
+    const len = dec.readVarInt();
 
     try descs.ensureTotalCapacity(allocator, len);
 
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const columndID = try dec.readVarInt(u16);
-        const offset = try dec.readVarInt(usize);
+        const columndID: u16 = @intCast(dec.readVarInt());
+        const offset = dec.readVarInt();
 
         descs.appendAssumeCapacity(.{
             .columndID = columndID,
             .offset = offset,
         });
     }
+}
+
+test "encode columns and celledColumns" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testEncode, .{});
+}
+
+fn testEncode(allocator: std.mem.Allocator) !void {
+    var s = try Self.init(allocator);
+    defer s.deinit(allocator);
+
+    try s.columns.append(allocator, .{ .columndID = 1, .offset = 10 });
+    try s.columns.append(allocator, .{ .columndID = 2, .offset = 20 });
+
+    try s.celledColumns.append(allocator, .{ .columndID = 3, .offset = 30 });
+    try s.celledColumns.append(allocator, .{ .columndID = 4, .offset = 40 });
+
+    var buf = try allocator.alloc(u8, s.encodeBound());
+    defer allocator.free(buf);
+
+    const written = s.encode(buf);
+
+    const decoded = try Self.decode(allocator, buf[0..written]);
+    defer decoded.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.columns.items.len);
+    try std.testing.expectEqual(@as(usize, 2), decoded.celledColumns.items.len);
+
+    try std.testing.expectEqual(@as(u16, 4), decoded.celledColumns.items[1].columndID);
+    try std.testing.expectEqual(@as(usize, 40), decoded.celledColumns.items[1].offset);
 }

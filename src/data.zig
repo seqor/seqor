@@ -284,7 +284,8 @@ pub const Data = struct {
         return std.time.Timer.start() catch unreachable;
     }
 
-    fn openBlockStreamReaders(allocator: std.mem.Allocator) []*BlockReader {
+    fn openBlockStreamReaders(self: *Data, allocator: std.mem.Allocator) ![]*BlockReader {
+        _ = self;
         const readers = try allocator.alloc(*BlockReader, 1);
         return readers;
     }
@@ -320,6 +321,8 @@ pub const Data = struct {
             .big => {},
         }
         const mergeIdx = self.nextMergeIdx();
+        const readers = self.openBlockStreamReaders(alloc) catch std.debug.panic("failed to open block readers", .{});
+        _ = readers;
         //
         const dstPathPart = self.getDstPartPath(alloc, dstPartType, mergeIdx) catch std.debug.panic("path problem dstPathPart", .{});
         defer alloc.free(dstPathPart);
