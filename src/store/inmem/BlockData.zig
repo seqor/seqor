@@ -25,14 +25,12 @@ pub const BlockData = struct {
     uncompressedSizeBytes: u64 = 0,
     rowsCount: u32 = 0,
 
-    timestampsData: TimestampsData = .{},
+    timestampsData: TimestampsData,
     columnsData: std.ArrayList(ColumnData),
     celledColumns: ?*const []Column = null,
 
     pub fn initEmpty() BlockData {
-        return .{
-            .columnsData = std.ArrayList(ColumnData).empty,
-        };
+        return .{ .columnsData = std.ArrayList(ColumnData).empty, .timestampsData = .{} };
     }
 
     pub fn reset(self: *BlockData) void {
@@ -61,7 +59,7 @@ pub const BlockData = struct {
         self.uncompressedSizeBytes = bh.size;
         self.rowsCount = bh.len;
 
-        self.timestampsData = TimestampsData.readFrom(&bh.timestampsHeader, &sr);
+        self.timestampsData = try TimestampsData.readFrom(&bh.timestampsHeader, sr);
 
         const columnsHeaderSize = bh.columnsHeaderSize;
         if (columnsHeaderSize > maxColumnsHeaderSize) {
@@ -114,15 +112,15 @@ pub const BlockData = struct {
         const csh = try ColumnsHeader.decode(
             allocator,
             columnsHeaderBuf,
-            &cshIdx,
-            &sr.columnIDGen,
+            cshIdx,
+            sr.columnIDGen,
         );
         defer csh.deinit(allocator);
 
         try self.columnsData.ensureTotalCapacity(allocator, csh.headers.len);
 
         for (csh.headers) |*ch| {
-            const col = try ColumnData.readFrom(ch, &sr);
+            const col = try ColumnData.readFrom(ch, sr);
             self.columnsData.appendAssumeCapacity(col);
         }
 
@@ -131,18 +129,18 @@ pub const BlockData = struct {
 };
 
 pub const TimestampsData = struct {
-    data: []const u8,
+    data: []const u8 = undefined,
 
-    encodingType: EncodingType,
+    encodingType: EncodingType = .Undefined,
 
-    minTimestamp: u64,
+    minTimestamp: u64 = 0,
 
-    maxTimestamp: u64,
+    maxTimestamp: u64 = 0,
 
     pub fn readFrom(
         th: *const TimestampsHeader,
         sr: *const StreamReader,
-    ) TimestampsData {
+    ) !TimestampsData {
         const timestampsBlockSize = th.size;
         if (timestampsBlockSize > maxTimestampsBlockSize) {
             std.log.err(
@@ -171,12 +169,12 @@ pub const TimestampsData = struct {
 
 pub const ColumnData = struct {
     name: []const u8,
-    valueType: *ColumnType,
+    valueType: *const ColumnType,
 
     minValue: u64,
     maxValue: u64,
 
-    valuesDict: *ColumnDict,
+    valuesDict: *const ColumnDict,
     valuesData: []const u8,
 
     bloomFilterData: ?[]const u8,
@@ -185,8 +183,8 @@ pub const ColumnData = struct {
         ch: *const ColumnHeader,
         sr: *const StreamReader,
     ) !ColumnData {
-        const colID = try sr.columnIDGen.keyIDs.get(ch.key);
-        const bloomBufI = try sr.colIdx.get(colID);
+        const colID = sr.columnIDGen.keyIDs.get(ch.key) orelse return error.KeyNotFound;
+        const bloomBufI = sr.colIdx.get(colID) orelse return error.ColumnNotFound;
 
         if (bloomBufI >= sr.bloomValuesList.len) {
             std.log.err(
@@ -212,7 +210,7 @@ pub const ColumnData = struct {
 
         if (ch.type != .dict) {
             const bloomTokensBuf = sr.bloomTokensList[bloomBufI];
-            bloomFilterData = bloomTokensBuf[ch.bloomFilterOffset][0..ch.bloomFilterSize];
+            bloomFilterData = bloomTokensBuf[ch.bloomFilterOffset..][0..ch.bloomFilterSize];
         }
 
         return .{
