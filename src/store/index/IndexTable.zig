@@ -233,6 +233,7 @@ pub fn mergeTables(
     // TODO: check table kind
     const newMemTable = try MemTable.empty(alloc);
     var blockWriter = BlockWriter.initFromMemTable(newMemTable);
+    defer blockWriter.deinit(alloc);
 
     try newMemTable.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
     const newTable = openCreatedTable(destinationTablePath, self.memTables.items, newMemTable);

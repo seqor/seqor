@@ -170,6 +170,7 @@ fn flush(
     }
     tableHeader.lastItem = blockLastItem;
     try writer.writeBlock(alloc, self.block);
+    tableHeader.blocksCount += 1;
     self.block.reset();
 }
 
@@ -342,19 +343,19 @@ test "BlockMerger.mergeBasicScenarios" {
         },
         .{
             .blocks = &.{&.{ "a", "b", "c" }},
-            .expectedTableHeader = .{ .itemsCount = 3, .firstItem = "a", .lastItem = "c" },
+            .expectedTableHeader = .{ .itemsCount = 3, .blocksCount = 1, .firstItem = "a", .lastItem = "c" },
         },
         .{
             .blocks = &.{ &.{ "a", "d", "g" }, &.{ "b", "e", "h" }, &.{ "c", "f", "i" } },
-            .expectedTableHeader = .{ .itemsCount = 9, .firstItem = "a", .lastItem = "i" },
+            .expectedTableHeader = .{ .itemsCount = 9, .blocksCount = 1, .firstItem = "a", .lastItem = "i" },
         },
         .{
             .blocks = &.{ &.{ "a", "b", "c" }, &.{ "x", "y", "z" } },
-            .expectedTableHeader = .{ .itemsCount = 6, .firstItem = "a", .lastItem = "z" },
+            .expectedTableHeader = .{ .itemsCount = 6, .blocksCount = 1, .firstItem = "a", .lastItem = "z" },
         },
         .{
             .blocks = &.{ &.{ "a", "b", "c" }, &.{ "b", "c", "d" } },
-            .expectedTableHeader = .{ .itemsCount = 6, .firstItem = "a", .lastItem = "d" },
+            .expectedTableHeader = .{ .itemsCount = 6, .blocksCount = 1, .firstItem = "a", .lastItem = "d" },
         },
     };
 

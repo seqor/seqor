@@ -152,10 +152,8 @@ fn mergeIntoMemTable(
 ) !void {
     self.flushAtUs = flushAtUs;
 
-    var outItemsCount: u64 = 0;
-    for (readers.items) |reader| outItemsCount += reader.tableHeader.itemsCount;
-
     var writer = BlockWriter.initFromMemTable(self);
+    defer writer.deinit(alloc);
     try self.mergeBlocks(alloc, "", &writer, readers, null);
 }
 
@@ -168,6 +166,7 @@ pub fn mergeBlocks(
     stopped: ?*std.atomic.Value(bool),
 ) !void {
     var merger = try BlockMerger.init(alloc, readers);
+    defer merger.deinit(alloc);
 
     self.tableHeader = try merger.merge(alloc, writer, stopped);
     try writer.close(alloc);

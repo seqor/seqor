@@ -85,7 +85,6 @@ pub fn encodePrefix(self: *const Self, dst: []u8) void {
     _ = self.tag.encodeIndexTag(enc.buf[enc.offset..]);
 }
 
-// FIXME: refactor the tag parser to use encodeRecords instead
 pub fn encodeRecordBound(tag: Field, streamIDsLen: usize) usize {
     return 1 + maxTenantIDLen + tag.encodeIndexTagBound() + streamIDsLen * @sizeOf(u128);
 }
