@@ -227,17 +227,17 @@ pub fn mergeTables(
     const tableKind = getDestinationTableKind(self.memTables.items, force);
     var fba = std.heap.stackFallback(64, alloc);
     const fbaAlloc = fba.get();
-    var destinationTablePath = "";
-    defer if (destinationTablePath.len > 0) fbaAlloc.free(destinationTablePath);
+    // 1 for / and 16 for 16 bytes of idx representation,
+    // we can't bitcast it to [8]u8 because we need human readlable file names
+    var destinationTablePath = try fbaAlloc.alloc(u8, self.path.len + 1 + 16);
+    defer fbaAlloc.free(destinationTablePath);
     if (tableKind == .file) {
         const idx = self.nextMergeIdx();
-        // dstPartPath = filepath.Join(tb.path, fmt.Sprintf("%016X", mergeIdx))
         var idxPathBuf: [16]u8 = undefined;
         _ = try std.fmt.bufPrint(&idxPathBuf, "{x:0>16}", .{idx});
-        destinationTablePath = std.mem.concat(fbaAlloc, u8, &.{
-            self.path,
-            idxPathBuf[0..],
-        });
+        @memcpy(destinationTablePath[0..self.path.len], self.path);
+        destinationTablePath[self.path.len] = '/';
+        @memcpy(destinationTablePath[self.path.len + 1 ..], idxPathBuf[0..]);
     }
 
     // FIXME: implement a shutdown path
@@ -260,22 +260,23 @@ pub fn mergeTables(
     defer blockWriter.deinit(alloc);
     if (tableKind == .mem) {
         newMemTable = try MemTable.empty(alloc);
-        blockWriter = BlockWriter.initFromMemTable(newMemTable);
+        blockWriter = BlockWriter.initFromMemTable(newMemTable.?);
     } else {
         var sourceItemsCount: u64 = 0;
         for (self.memTables.items) |table| {
             sourceItemsCount += table.tableHeader.itemsCount;
         }
-        const toCache = sourceItemsCount <= maxItemsPerCachedTable();
-        blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
+        // const toCache = sourceItemsCount <= maxItemsPerCachedTable();
+        // blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
     }
 
-    try table.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
-        if (newMemTable) |memTable| {
+    try newMemTable.?.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
+    if (newMemTable) |memTable| {
+        _ = memTable;
         newMemTable = try MemTable.empty(alloc);
     }
 
-    const newTable = openCreatedTable(destinationTablePath, self.memTables.items, newMemTable);
+    const newTable = openCreatedTable(destinationTablePath, self.memTables.items, newMemTable.?);
     try self.swapTables(alloc, newTable, tableKind);
 }
 
