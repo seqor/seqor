@@ -20,9 +20,9 @@ const maxBlocksPerShard = 256;
 
 // TODO: worth tuning on practice
 const blocksInMemTable = 15;
+const maxMemTables = 24;
 
-// TODO: rename to IndexRecorder, there is nothing about Table
-const Self = @This();
+const IndexRecorder = @This();
 
 entries: *Entries,
 
@@ -37,9 +37,11 @@ maxIndexBlockSize: u32,
 stopped: std.atomic.Value(bool) = .init(false),
 // limits amount of mem tables in order to handle too high ingestion rate,
 // when mem tables are not merged fast enough
-memTablesSem: std.Thread.Semaphore = .{},
+memTablesSem: std.Thread.Semaphore = .{
+    .permits = maxMemTables,
+},
 memTablesMx: std.Thread.Mutex = .{},
-memTables: std.ArrayList(*MemTable) = .empty,
+memTables: std.ArrayList(*MemTable),
 
 pool: *std.Thread.Pool,
 // wg holds all the running jobs
@@ -48,7 +50,10 @@ wg: std.Thread.WaitGroup = .{},
 needInvalidate: std.atomic.Value(bool) = .init(false),
 indexCacheKeyVersion: std.atomic.Value(u64) = .init(0),
 
-pub fn init(alloc: Allocator) !*Self {
+mergeIdx: std.atomic.Value(u64),
+path: []const u8,
+
+pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
     const conf = Conf.getConf();
     const entries = try Entries.init(alloc);
     errdefer entries.deinit(alloc);
@@ -66,25 +71,35 @@ pub fn init(alloc: Allocator) !*Self {
         .n_jobs = conf.server.pools.workerThreads,
     });
 
-    const t = try alloc.create(Self);
+    var memTables = try std.ArrayList(*MemTable).initCapacity(alloc, maxMemTables);
+    errdefer memTables.deinit(alloc);
+
+    const t = try alloc.create(IndexRecorder);
     t.* = .{
         .entries = entries,
         .blocksThresholdToFlush = @intCast(entries.shards.len * maxBlocksPerShard),
         .blocksToFlush = blocksToFlush,
         .maxIndexBlockSize = Conf.getConf().app.maxIndexMemBlockSize,
         .pool = pool,
+        .memTables = memTables,
+        .mergeIdx = .init(@intCast(std.time.nanoTimestamp())),
+        .path = path,
     };
     return t;
 }
 
-pub fn deinit(self: *Self, alloc: Allocator) void {
+pub fn deinit(self: *IndexRecorder, alloc: Allocator) void {
     self.entries.deinit(alloc);
     self.blocksToFlush.deinit(alloc);
     self.pool.deinit();
     alloc.destroy(self);
 }
 
-pub fn add(self: *Self, alloc: Allocator, entries: [][]const u8) !void {
+pub fn nextMergeIdx(self: *IndexRecorder) u64 {
+    return self.mergeIdx.fetchAdd(1, .acquire);
+}
+
+pub fn add(self: *IndexRecorder, alloc: Allocator, entries: [][]const u8) !void {
     const shard = self.entries.next();
     const blocksList = try shard.add(alloc, entries, self.maxIndexBlockSize);
     if (blocksList == null) return;
@@ -94,7 +109,7 @@ pub fn add(self: *Self, alloc: Allocator, entries: [][]const u8) !void {
     try self.flushBlocks(alloc, blocks.items);
 }
 
-fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
+fn flushBlocks(self: *IndexRecorder, alloc: Allocator, blocks: []*MemBlock) !void {
     if (blocks.len == 0) return;
 
     self.mxBlocks.lock();
@@ -111,7 +126,7 @@ fn flushBlocks(self: *Self, alloc: Allocator, blocks: []*MemBlock) !void {
     }
 }
 
-fn flushBlocksToMemTables(self: *Self, alloc: Allocator, blocks: []*MemBlock, force: bool) !void {
+fn flushBlocksToMemTables(self: *IndexRecorder, alloc: Allocator, blocks: []*MemBlock, force: bool) !void {
     const tablesSize = (blocks.len + blocksInMemTable - 1) / blocksInMemTable;
     var memTables = try std.ArrayList(*MemTable).initCapacity(alloc, tablesSize);
     errdefer {
@@ -152,7 +167,7 @@ fn mergeMemTables(alloc: Allocator, memTables: []*MemTable) !*MemTable {
     return MemTable.mergeTables(alloc, memTables);
 }
 
-fn addToMemTables(self: *Self, alloc: Allocator, memTable: *MemTable, force: bool) !void {
+fn addToMemTables(self: *IndexRecorder, alloc: Allocator, memTable: *MemTable, force: bool) !void {
     var semaphoreWaited = false; // if not stopped then wait for an available semaphore
     if (!self.stopped.load(.acquire)) {
         self.memTablesSem.wait();
@@ -160,13 +175,12 @@ fn addToMemTables(self: *Self, alloc: Allocator, memTable: *MemTable, force: boo
     }
     errdefer if (semaphoreWaited) self.memTablesSem.post();
 
-    // TODO: ideally to know the amount of mem tables and call unlock immediately.
-    // it cuts lock time down, but requires handling stop differently,
-    // because we can't rely on the semaphore limit
+    // TODO: ideally to know the amount of mem tables and call unlock without errdefer
     self.memTablesMx.lock();
-    defer self.memTablesMx.unlock();
+    errdefer self.memTablesMx.unlock();
     try self.memTables.append(alloc, memTable);
     try self.startMemTablesMerge(alloc);
+    self.memTablesMx.unlock();
 
     if (force) {
         self.invalidateStreamFilterCache();
@@ -177,7 +191,7 @@ fn addToMemTables(self: *Self, alloc: Allocator, memTable: *MemTable, force: boo
     }
 }
 
-fn startMemTablesMerge(self: *Self, alloc: Allocator) !void {
+fn startMemTablesMerge(self: *IndexRecorder, alloc: Allocator) !void {
     if (self.stopped.load(.acquire)) return;
 
     // TODO: schedule a background job to merge mem tables,
@@ -188,7 +202,7 @@ fn startMemTablesMerge(self: *Self, alloc: Allocator) !void {
     return self.runMemTablesMerger(alloc);
 }
 
-fn runMemTablesMerger(self: *Self, alloc: Allocator) !void {
+fn runMemTablesMerger(self: *IndexRecorder, alloc: Allocator) !void {
     while (true) {
         // TODO: implement disk space limit
 
@@ -201,26 +215,37 @@ fn runMemTablesMerger(self: *Self, alloc: Allocator) !void {
     }
 }
 
-fn invalidateStreamFilterCache(self: *Self) void {
+fn invalidateStreamFilterCache(self: *IndexRecorder) void {
     _ = self.indexCacheKeyVersion.fetchAdd(1, .acquire);
 }
 
 pub fn mergeTables(
-    self: *Self,
+    self: *IndexRecorder,
     alloc: Allocator,
     force: bool,
 ) !void {
     const tableKind = getDestinationTableKind(self.memTables.items, force);
-    const destinationTablePath = "";
+    var fba = std.heap.stackFallback(64, alloc);
+    const fbaAlloc = fba.get();
+    var destinationTablePath = "";
+    defer if (destinationTablePath.len > 0) fbaAlloc.free(destinationTablePath);
+    if (tableKind == .file) {
+        const idx = self.nextMergeIdx();
+        // dstPartPath = filepath.Join(tb.path, fmt.Sprintf("%016X", mergeIdx))
+        var idxPathBuf: [16]u8 = undefined;
+        _ = try std.fmt.bufPrint(&idxPathBuf, "{x:0>16}", .{idx});
+        destinationTablePath = std.mem.concat(fbaAlloc, u8, &.{
+            self.path,
+            idxPathBuf[0..],
+        });
+    }
 
-    // TODO: implement merging into a file here
-
-    // TODO: implement a shutdown path
-    // if (force and memTables.len == 1) {
-    //     const table = memTables[0];
+    // FIXME: implement a shutdown path
+    // if (force and self.memTables.items.len == 1) {
+    //     const table = self.memTables.items[0];
     //     table.storeToDisk(destinationTablePath);
-    //     const newTable = openCreatedTable(destinationTablePath, memTables, null);
-    //     self.swapTables(memTables, newTable, tableKind);
+    //     const newTable = openCreatedTable(destinationTablePath, self.memTables, null);
+    //     self.swapTables(self.memTables, newTable, tableKind);
     //     return;
     // }
 
@@ -230,28 +255,57 @@ pub fn mergeTables(
         readers.deinit(alloc);
     }
 
-    // TODO: check table kind
-    const newMemTable = try MemTable.empty(alloc);
-    var blockWriter = BlockWriter.initFromMemTable(newMemTable);
+    var newMemTable: ?*MemTable = undefined;
+    var blockWriter: BlockWriter = undefined;
     defer blockWriter.deinit(alloc);
+    if (tableKind == .mem) {
+        newMemTable = try MemTable.empty(alloc);
+        blockWriter = BlockWriter.initFromMemTable(newMemTable);
+    } else {
+        var sourceItemsCount: u64 = 0;
+        for (self.memTables.items) |table| {
+            sourceItemsCount += table.tableHeader.itemsCount;
+        }
+        const toCache = sourceItemsCount <= maxItemsPerCachedTable();
+        blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
+    }
 
-    try newMemTable.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
+    try table.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
+        if (newMemTable) |memTable| {
+        newMemTable = try MemTable.empty(alloc);
+    }
+
     const newTable = openCreatedTable(destinationTablePath, self.memTables.items, newMemTable);
     try self.swapTables(alloc, newTable, tableKind);
 }
 
 // TODO: implement it, at the moment it does only mem tables merging
 fn getDestinationTableKind(tables: []*MemTable, force: bool) TableKind {
-    _ = tables;
-    _ = force;
-    // const size = getTableSize(tables);
-    // if (force or size > getMaxInmemoryTableSize()) {
-    //     return .file;
-    // }
-    // if (!areTablesMem(tables)) {
-    //     return .file;
-    // }
+    if (force) return .file;
+
+    const size = getTablesSize(tables);
+    if (size > getMaxInmemoryTableSize()) return .file;
+    if (!areTablesMem(tables)) return .file;
+
     return .mem;
+}
+
+// 4mb is a minimal size for mem table,
+// technically it makes minimum requirement as 1GB for the software,
+// if edge use case comes up, we can lower it further up to 0.5-1mb, then configure it in build time
+const minMemTableSize: u64 = 4 * 1024 * 1024;
+// TODO: make it as a config field instead of calculated property
+fn getMaxInmemoryTableSize() u64 {
+    const conf = Conf.getConf();
+    // only 10% of cache available for mem index
+    // TODO: experiment with tuning cache size to 5%, 15%
+    const maxmem = (conf.sys.cacheSize / 10) / maxMemTables;
+    return @max(maxmem, minMemTableSize);
+}
+
+fn areTablesMem(_: []*MemTable) bool {
+    // FIXME: it's fake
+    return true;
 }
 
 fn getTablesSize(tables: []*MemTable) u64 {
@@ -260,6 +314,14 @@ fn getTablesSize(tables: []*MemTable) u64 {
         n += table.size();
     }
     return n;
+}
+
+// TODO: move it to config instead of computed property
+fn maxItemsPerCachedTable() u64 {
+    const sysConf = Conf.getConf().sys;
+    const restMem = sysConf.maxMem - sysConf.cacheSize;
+    // we anticipate 4 bytes per index item in compressed form
+    return @max(restMem / (4 * blocksInMemTable), minMemTableSize);
 }
 
 fn openTableReaders(alloc: Allocator, tables: []*MemTable) !std.ArrayList(*BlockReader) {
@@ -290,7 +352,7 @@ fn openCreatedTable(
 }
 
 fn swapTables(
-    self: *Self,
+    self: *IndexRecorder,
     alloc: Allocator,
     newTable: *MemTable,
     tableKind: TableKind,
@@ -305,12 +367,12 @@ fn swapTables(
     // worth taking a metric of it
 }
 
-fn startCacheKeyInvalidator(self: *Self) !void {
+fn startCacheKeyInvalidator(self: *IndexRecorder) !void {
     // TODO: add time sleep jitter
     self.wg.spawnManager(startCacheKeyInvalidatorTask, .{self});
 }
 
-fn startCacheKeyInvalidatorTask(self: *Self) void {
+fn startCacheKeyInvalidatorTask(self: *IndexRecorder) void {
     while (true) {
         std.time.sleep(std.time.ns_per_s * 10);
 
@@ -325,10 +387,10 @@ fn startCacheKeyInvalidatorTask(self: *Self) void {
     }
 }
 
-fn startMemTablesFlusher(self: *Self, _: Allocator) void {
+fn startMemTablesFlusher(self: *IndexRecorder, _: Allocator) void {
     _ = self;
 }
 
-fn startEntriesFlusher(self: *Self, _: Allocator) void {
+fn startEntriesFlusher(self: *IndexRecorder, _: Allocator) void {
     _ = self;
 }

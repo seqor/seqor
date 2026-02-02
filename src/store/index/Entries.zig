@@ -12,7 +12,7 @@ const EntriesShard = struct {
     blocks: std.ArrayList(*MemBlock),
     flushAtUs: i64,
 
-    // TODO: init blocks with maxBlocks capacity
+    // TODO: init EntriesShard and its blocks with maxBlocks capacity
 
     pub fn add(
         self: *EntriesShard,
