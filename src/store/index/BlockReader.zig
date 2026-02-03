@@ -6,7 +6,7 @@ const encoding = @import("encoding");
 
 const MemBlock = @import("MemBlock.zig");
 const MemTable = @import("MemTable.zig");
-const MetaIndexRecord = @import("MetaIndexRecord.zig");
+const MetaIndex = @import("MetaIndex.zig");
 const StorageBlock = @import("StorageBlock.zig");
 const TableHeader = @import("TableHeader.zig");
 const BlockHeader = @import("BlockHeader.zig");
@@ -39,7 +39,7 @@ isRead: bool,
 // metaindex state
 metaIndexI: usize = 0,
 // metaindex passed on init
-metaIndexRecords: []MetaIndexRecord = &.{},
+metaIndexRecords: []MetaIndex = &.{},
 // compressed buf
 compressedBuf: std.ArrayList(u8) = .empty,
 // uncompressed buf
@@ -219,13 +219,13 @@ fn readNextBlockHeaders(self: *BlockReader, alloc: Allocator) !bool {
     return true;
 }
 
-fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blocksCount: usize) ![]MetaIndexRecord {
+fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blocksCount: usize) ![]MetaIndex {
     const decomporessedSize = try encoding.getFrameContentSize(metaindexBuf.items);
     const buf = try alloc.alloc(u8, decomporessedSize);
     defer alloc.free(buf);
     const bufOffset = try encoding.decompress(buf, metaindexBuf.items);
 
-    var records = try std.ArrayList(MetaIndexRecord).initCapacity(alloc, blocksCount);
+    var records = try std.ArrayList(MetaIndex).initCapacity(alloc, blocksCount);
     errdefer records.deinit(alloc);
 
     var slice = buf[0..bufOffset];
@@ -234,7 +234,7 @@ fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blo
         // TODO: test if holding them on heap is better,
         // 1. create a mem pool to pop the objects quickly
         // 2. change lessThan to use pointers
-        var rec: MetaIndexRecord = undefined;
+        var rec: MetaIndex = undefined;
         const n = rec.decode(slice);
         slice = slice[n..];
         totalBlockHeaders += rec.blockHeadersCount;
@@ -243,7 +243,7 @@ fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blo
 
     std.debug.assert(totalBlockHeaders == blocksCount);
     if (builtin.is_test) {
-        std.debug.assert(std.sort.isSorted(MetaIndexRecord, records.items, {}, MetaIndexRecord.lessThan));
+        std.debug.assert(std.sort.isSorted(MetaIndex, records.items, {}, MetaIndex.lessThan));
     }
 
     // remap must be successful in most of the time since records is the last allocation

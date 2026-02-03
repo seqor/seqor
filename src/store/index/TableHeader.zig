@@ -2,8 +2,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const fs = @import("../../fs.zig");
+const Filenames = @import("../../Filenames.zig");
 
-const filenameMeta = "metadata.json";
+const maxFileBytes = 16 * 1024 * 1024;
 
 const TableHeader = @This();
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const encoding = @import("encoding");
+const Decoder = encoding.Decoder;
 const Encoder = encoding.Encoder;
 
 const MetaIndex = @This();
@@ -36,4 +37,18 @@ pub fn encodeAlloc(self: *const MetaIndex, alloc: Allocator) ![]u8 {
     self.encode(buf);
 
     return buf;
+}
+
+pub fn decode(self: *MetaIndex, buf: []u8) usize {
+    var dec = Decoder.init(buf);
+    self.firstItem = dec.readString();
+    self.blockHeadersCount = dec.readInt(u32);
+    self.indexBlockOffset = dec.readInt(u64);
+    self.indexBlockSize = dec.readInt(u32);
+    std.debug.assert(self.blockHeadersCount > 0);
+    return dec.offset;
+}
+
+pub fn lessThan(_: void, one: MetaIndex, another: MetaIndex) bool {
+    return std.mem.lessThan(u8, one.firstItem, another.firstItem);
 }

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const Entries = @import("Entries.zig");
 const MemBlock = @import("MemBlock.zig");
+const Table = @import("Table.zig");
 const MemTable = @import("MemTable.zig");
 const BlockWriter = @import("BlockWriter.zig");
 const BlockReader = @import("BlockReader.zig");
@@ -41,6 +42,7 @@ memTablesSem: std.Thread.Semaphore = .{
     .permits = maxMemTables,
 },
 memTablesMx: std.Thread.Mutex = .{},
+tables: std.ArrayList(*Table),
 memTables: std.ArrayList(*MemTable),
 
 pool: *std.Thread.Pool,
@@ -74,6 +76,14 @@ pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
     var memTables = try std.ArrayList(*MemTable).initCapacity(alloc, maxMemTables);
     errdefer memTables.deinit(alloc);
 
+    // TODO: move it to the config level
+    var trimmedPath = path[0..];
+    if (std.fs.path.isSep(trimmedPath[trimmedPath.len])) {
+        trimmedPath = trimmedPath[0 .. trimmedPath.len - 1];
+    }
+
+    const tables = try Table.openAll(alloc, trimmedPath);
+
     const t = try alloc.create(IndexRecorder);
     t.* = .{
         .entries = entries,
@@ -81,9 +91,10 @@ pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
         .blocksToFlush = blocksToFlush,
         .maxIndexBlockSize = Conf.getConf().app.maxIndexMemBlockSize,
         .pool = pool,
+        .tables = tables,
         .memTables = memTables,
         .mergeIdx = .init(@intCast(std.time.nanoTimestamp())),
-        .path = path,
+        .path = trimmedPath,
     };
     return t;
 }
@@ -91,6 +102,8 @@ pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
 pub fn deinit(self: *IndexRecorder, alloc: Allocator) void {
     self.entries.deinit(alloc);
     self.blocksToFlush.deinit(alloc);
+    self.tables.deinit(alloc);
+    self.memTables.deinit(alloc);
     self.pool.deinit();
     alloc.destroy(self);
 }

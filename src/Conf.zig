@@ -113,6 +113,8 @@ pub fn default() !Conf {
         .app = .{},
         .sys = sys,
     };
+
+    std.debug.assert(conf.app.flushIntervalUs >= std.time.us_per_s);
     return conf;
 }
 
