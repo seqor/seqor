@@ -12,6 +12,9 @@ pub const bloom = "bloom.bin";
 pub const messageValues = "message_values.bin";
 pub const messageBloom = "message_bloom.bin";
 
+pub const lens = "lens.bin";
+pub const entries = "entries.bin";
+
 pub const header = "header.json";
 pub const tables = "tables.json";
 pub const deleteTasks = "delete_tasks.json";

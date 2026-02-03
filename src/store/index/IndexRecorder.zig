@@ -82,7 +82,11 @@ pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
         trimmedPath = trimmedPath[0 .. trimmedPath.len - 1];
     }
 
-    const tables = try Table.openAll(alloc, trimmedPath);
+    var tables = try Table.openAll(alloc, trimmedPath);
+    errdefer {
+        for (tables.items) |table| table.close();
+        tables.deinit(alloc);
+    }
 
     const t = try alloc.create(IndexRecorder);
     t.* = .{

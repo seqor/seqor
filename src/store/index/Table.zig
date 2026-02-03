@@ -4,10 +4,10 @@ const Allocator = std.mem.Allocator;
 const Filenames = @import("../../Filenames.zig");
 const fs = @import("../../fs.zig");
 const strings = @import("../../stds/strings.zig");
-
 const TableHeader = @import("TableHeader.zig");
 const MemTable = @import("MemTable.zig");
 const DiskTable = @import("DiskTable.zig");
+const MetaIndex = @import("MetaIndex.zig");
 
 const Table = @This();
 
@@ -88,11 +88,71 @@ pub fn openAll(parentAlloc: Allocator, path: []const u8) !std.ArrayList(*Table) 
 }
 
 pub fn open(alloc: Allocator, path: []const u8) !*Table {
-    const tableHeader = try TableHeader.readFile(alloc, path);
-    _ = tableHeader;
+    var fba = std.heap.stackFallback(2048, alloc);
+    const fbaAlloc = fba.get();
+
+    var ph = try TableHeader.readFile(alloc, path);
+    errdefer ph.deinit(alloc);
+
+    const metaindexPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.metaindex });
+    defer fbaAlloc.free(metaindexPath);
+    var metaindexFile = try std.fs.openFileAbsolute(metaindexPath, .{});
+    defer metaindexFile.close();
+    const metaindexStat = try metaindexFile.stat();
+    const metaindexCompressed = try metaindexFile.readToEndAlloc(alloc, @intCast(metaindexStat.size));
+    defer alloc.free(metaindexCompressed);
+
+    const decodedMetaindex = try MetaIndex.decodeDecompress(alloc, metaindexCompressed, ph.blocksCount);
+    errdefer if (decodedMetaindex.records.len > 0) alloc.free(decodedMetaindex.records);
+
+    // TODO: open files in parallel to speed up work on high-latency storages, e.g. Ceph
+    const indexPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.index });
+    defer fbaAlloc.free(indexPath);
+    const entriesPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.entries });
+    defer fbaAlloc.free(entriesPath);
+    const lensPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.lens });
+    defer fbaAlloc.free(lensPath);
+
+    var indexFile = try std.fs.openFileAbsolute(indexPath, .{});
+    errdefer indexFile.close();
+    const indexSize = (try indexFile.stat()).size;
+
+    var entriesFile = try std.fs.openFileAbsolute(entriesPath, .{});
+    errdefer entriesFile.close();
+    const entriesSize = (try entriesFile.stat()).size;
+
+    var lensFile = try std.fs.openFileAbsolute(lensPath, .{});
+    errdefer lensFile.close();
+    const lensSize = (try lensFile.stat()).size;
+
+    const disk = try alloc.create(DiskTable);
+    errdefer alloc.destroy(disk);
+    disk.* = .{
+        .tableHeader = ph,
+        .path = path,
+        .size = metaindexStat.size + indexSize + entriesSize + lensSize,
+        .metaindexRecords = decodedMetaindex.records,
+        .indexFile = indexFile,
+        .entriesFile = entriesFile,
+        .lensFile = lensFile,
+    };
+
+    const table = try alloc.create(Table);
+    errdefer alloc.destroy(table);
+    table.* = .{
+        .mem = null,
+        .disk = disk,
+    };
+
+    return table;
 }
 
-// pub fn close(self: *Table, alloc: Allocator) void {}
+pub fn close(self: *Table) void {
+    // TODO: close files in parallel
+    self.disk.indexFile.close();
+    self.disk.entriesFile.close();
+    self.disk.lensFile.close();
+}
 
 // nothing specific, we simply don't expected a small json file to be larger than that
 const maxFileBytes = 16 * 1024 * 1024;
