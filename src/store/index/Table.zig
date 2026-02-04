@@ -13,7 +13,9 @@ const Table = @This();
 
 // either one has to be available
 mem: ?*MemTable,
-disk: *DiskTable,
+disk: ?*DiskTable,
+size: u64,
+path: []const u8,
 
 inMerge: bool = false,
 
@@ -78,10 +80,9 @@ pub fn openAll(parentAlloc: Allocator, path: []const u8) !std.ArrayList(*Table) 
         tables.deinit(parentAlloc);
     }
     for (tableNames.items) |tableName| {
-        _ = tableName;
-        // const tablePath = try std.fs.path.join(alloc, &.{ path, tableName });
-        // const table = try Table.open(parentAlloc, tablePath);
-        // tables.appendAssumeCapacity(table);
+        const tablePath = try std.fs.path.join(alloc, &.{ path, tableName });
+        const table = try Table.open(parentAlloc, tablePath);
+        tables.appendAssumeCapacity(table);
     }
 
     return tables;
@@ -129,8 +130,6 @@ pub fn open(alloc: Allocator, path: []const u8) !*Table {
     errdefer alloc.destroy(disk);
     disk.* = .{
         .tableHeader = ph,
-        .path = path,
-        .size = metaindexStat.size + indexSize + entriesSize + lensSize,
         .metaindexRecords = decodedMetaindex.records,
         .indexFile = indexFile,
         .entriesFile = entriesFile,
@@ -138,20 +137,36 @@ pub fn open(alloc: Allocator, path: []const u8) !*Table {
     };
 
     const table = try alloc.create(Table);
-    errdefer alloc.destroy(table);
     table.* = .{
         .mem = null,
         .disk = disk,
+        .size = metaindexStat.size + indexSize + entriesSize + lensSize,
+        .path = path,
     };
 
     return table;
 }
 
-pub fn close(self: *Table) void {
+pub fn close(self: *Table, alloc: Allocator) void {
     // TODO: close files in parallel
-    self.disk.indexFile.close();
-    self.disk.entriesFile.close();
-    self.disk.lensFile.close();
+    if (self.disk) |disk| {
+        disk.indexFile.close();
+        disk.entriesFile.close();
+        disk.lensFile.close();
+    }
+    alloc.destroy(self);
+}
+
+pub fn fromMem(alloc: Allocator, memTable: *MemTable) !*Table {
+    const table = try alloc.create(Table);
+    table.* = .{
+        .mem = memTable,
+        .disk = null,
+        .size = memTable.size(),
+        .path = "",
+    };
+
+    return table;
 }
 
 // nothing specific, we simply don't expected a small json file to be larger than that
@@ -205,11 +220,4 @@ fn readTableNames(alloc: Allocator, tablesFilePath: []const u8) !std.ArrayList([
         },
         else => return err,
     }
-}
-
-pub fn size(self: *Table) u64 {
-    if (self.mem) |mem| {
-        return mem.size();
-    }
-    return self.disk.?.size;
 }

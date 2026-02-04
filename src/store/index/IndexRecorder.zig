@@ -84,7 +84,7 @@ pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
 
     var tables = try Table.openAll(alloc, trimmedPath);
     errdefer {
-        for (tables.items) |table| table.close();
+        for (tables.items) |table| table.close(alloc);
         tables.deinit(alloc);
     }
 
@@ -228,7 +228,7 @@ fn runMemTablesMerger(self: *IndexRecorder, alloc: Allocator) !void {
         }
 
         // TODO: make sure error.Stopped is handled on the upper level
-        try self.mergeTables(alloc, false);
+        try self.mergeTables(alloc, self.memTables, false);
     }
 }
 
@@ -239,9 +239,10 @@ fn invalidateStreamFilterCache(self: *IndexRecorder) void {
 pub fn mergeTables(
     self: *IndexRecorder,
     alloc: Allocator,
+    tables: []*Table,
     force: bool,
 ) !void {
-    const tableKind = getDestinationTableKind(self.memTables.items, force);
+    const tableKind = getDestinationTableKind(tables.items, force);
     var fba = std.heap.stackFallback(64, alloc);
     const fbaAlloc = fba.get();
     // 1 for / and 16 for 16 bytes of idx representation,
@@ -298,7 +299,7 @@ pub fn mergeTables(
 }
 
 // TODO: implement it, at the moment it does only mem tables merging
-fn getDestinationTableKind(tables: []*MemTable, force: bool) TableKind {
+fn getDestinationTableKind(tables: []*Table, force: bool) TableKind {
     if (force) return .file;
 
     const size = getTablesSize(tables);
@@ -321,15 +322,22 @@ fn getMaxInmemoryTableSize() u64 {
     return @max(maxmem, minMemTableSize);
 }
 
-fn areTablesMem(_: []*MemTable) bool {
-    // FIXME: it's fake
+fn areTablesMem(tables: []*Table) bool {
+    for (tables) |table| {
+        if (table.mem) |_| {
+            continue;
+        } else {
+            return false;
+        }
+    }
+
     return true;
 }
 
 fn getTablesSize(tables: []*MemTable) u64 {
     var n: u64 = 0;
     for (tables) |table| {
-        n += table.size();
+        n += table.size;
     }
     return n;
 }

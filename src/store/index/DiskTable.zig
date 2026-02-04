@@ -8,10 +8,10 @@ const DiskTable = @This();
 
 tableHeader: TableHeader,
 metaindexRecords: []MetaIndex,
+
 indexFile: std.fs.File,
 entriesFile: std.fs.File,
 lensFile: std.fs.File,
-size: u64,
 
 pub fn deinit(self: *DiskTable, alloc: Allocator) void {
     self.indexFile.close();
