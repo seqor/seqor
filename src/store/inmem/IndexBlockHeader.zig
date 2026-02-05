@@ -36,7 +36,6 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
 }
 
 pub fn deinitSIDAlloc(self: *Self, allocator: std.mem.Allocator) void {
-    allocator.destroy(self);
     self.sid.deinit(allocator);
 }
 

@@ -127,11 +127,20 @@ pub const BlockReader = struct {
 
     pub fn initFromTableMem(allocator: std.mem.Allocator, tableMem: *TableMem) !*BlockReader {
         const indexBlockHeaders = try IndexBlockHeader.ReadIndexBlockHeaders(allocator, tableMem.streamWriter.metaIndexBuf.items);
-        const blockHeaders = try std.ArrayList(BlockHeader).initCapacity(allocator, 64);
+        errdefer {
+            for (indexBlockHeaders) |*h| h.deinitSIDAlloc(allocator);
+            allocator.free(indexBlockHeaders);
+        }
+
+        var blockHeaders = try std.ArrayList(BlockHeader).initCapacity(allocator, 64);
+        errdefer blockHeaders.deinit(allocator);
+
         const tableHeader = tableMem.tableHeader;
         const streamReader = try StreamReader.init(allocator, tableMem);
+        errdefer streamReader.deinit(allocator);
 
         const br = try allocator.create(BlockReader);
+        errdefer allocator.destroy(br);
 
         br.* = .{
             .blocksCount = 0,
@@ -163,6 +172,11 @@ pub const BlockReader = struct {
         self.blockHeaders.deinit(allocator);
         self.streamReader.deinit(allocator);
         self.blockData.deinit(allocator);
+
+        for (self.indexBlockHeaders) |*bh| {
+            bh.deinitSIDAlloc(allocator);
+        }
+        allocator.free(self.indexBlockHeaders);
 
         allocator.destroy(self);
     }
@@ -266,11 +280,9 @@ pub const BlockReader = struct {
             return error.InvalidTimestampRange;
         }
 
-        // Read indexBlock for the given ih
         const indexBlockData = try readIndexBlock(allocator, ih, self.streamReader);
         defer allocator.free(indexBlockData);
 
-        // Reset and unmarshal block headers
         self.blockHeaders.clearRetainingCapacity();
         try BlockHeader.decodeFew(allocator, &self.blockHeaders, indexBlockData);
 
@@ -308,6 +320,7 @@ const Field = @import("../lines.zig").Field;
 const SampleLines = struct {
     fields1: [2]Field,
     fields2: [2]Field,
+    fields3: [2]Field,
     lines: [3]Line,
 };
 
@@ -317,6 +330,10 @@ fn populateSampleLines(sample: *SampleLines) void {
         .{ .key = "app", .value = "seq" },
     };
     sample.fields2 = .{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    sample.fields3 = .{
         .{ .key = "level", .value = "warn" },
         .{ .key = "app", .value = "seq" },
     };
@@ -334,7 +351,7 @@ fn populateSampleLines(sample: *SampleLines) void {
         .{
             .timestampNs = 3,
             .sid = .{ .id = 1, .tenantID = "1111" },
-            .fields = sample.fields2[0..],
+            .fields = sample.fields3[0..],
         },
     };
 }
@@ -347,6 +364,7 @@ fn testReadBlock(allocator: std.mem.Allocator) !void {
     var sample: SampleLines = SampleLines{
         .fields1 = undefined,
         .fields2 = undefined,
+        .fields3 = undefined,
         .lines = undefined,
     };
     populateSampleLines(&sample);
@@ -363,12 +381,13 @@ fn testReadBlock(allocator: std.mem.Allocator) !void {
     try memTable.addLines(allocator, lines[0..]);
 
     const blockReader = try BlockReader.initFromTableMem(allocator, memTable);
+    defer blockReader.deinit(allocator);
 
     var i: u32 = 0;
     while (try blockReader.NextBlock(allocator)) {
         i += 1;
     }
 
-    try std.testing.expectEqual(3, i);
+    try std.testing.expectEqual(2, i);
     try std.testing.expectEqual(1, 1);
 }
