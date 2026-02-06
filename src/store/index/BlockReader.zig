@@ -25,9 +25,9 @@ tableHeader: TableHeader,
 
 // TODO: these buffers could be files, on zig 0.16 implement a reader API,
 // this change will require implementing a proper close method
-indexBuf: std.ArrayList(u8) = .empty,
-dataBuf: std.ArrayList(u8) = .empty,
-lensBuf: std.ArrayList(u8) = .empty,
+indexBuf: std.ArrayList(u8),
+dataBuf: std.ArrayList(u8),
+lensBuf: std.ArrayList(u8),
 
 // state
 
@@ -71,27 +71,29 @@ pub fn initFromMemBlock(alloc: Allocator, block: *MemBlock) !*BlockReader {
         .tableHeader = undefined,
         .currentI = 0,
         .isRead = false,
+        .indexBuf = .empty,
+        .dataBuf = .empty,
+        .lensBuf = .empty,
     };
     return r;
 }
 
 pub fn initFromMemTable(alloc: Allocator, memTable: *MemTable) !*BlockReader {
     std.debug.assert(memTable.tableHeader.blocksCount > 0);
-    const metaIndexRecords = try decodeMetaIndexRecords(
+    const metaIndexRecords = try MetaIndex.decodeDecompress(
         alloc,
-        memTable.metaindexBuf,
+        memTable.metaindexBuf.items,
         memTable.tableHeader.blocksCount,
     );
-    errdefer alloc.free(metaIndexRecords);
+    errdefer alloc.free(metaIndexRecords.records);
 
     const block = try MemBlock.init(alloc, @intCast(memTable.tableHeader.itemsCount));
     errdefer block.deinit(alloc);
 
     const r = try alloc.create(BlockReader);
-    errdefer alloc.destroy(r);
     r.* = .{
         .block = block,
-        .metaIndexRecords = metaIndexRecords,
+        .metaIndexRecords = metaIndexRecords.records,
         .tableHeader = memTable.tableHeader,
         .indexBuf = memTable.indexBuf,
         .dataBuf = memTable.dataBuf,
@@ -105,9 +107,41 @@ pub fn initFromMemTable(alloc: Allocator, memTable: *MemTable) !*BlockReader {
     return r;
 }
 
+pub fn initFromDiskTable(alloc: Allocator, path: []const u8) !*BlockReader {
+    const tableHeader = try TableHeader.readFile(alloc, path);
+    errdefer tableHeader.deinit(alloc);
+
+    const metaIndex = try MetaIndex.readFile(alloc, path, tableHeader.blocksCount);
+    errdefer {
+        for (metaIndex.records) |*index| {
+            index.deinit(alloc);
+        }
+        alloc.free(metaIndex.records);
+    }
+
+    // FIXME: open all the files here
+    const r = try alloc.create(BlockReader);
+    r.* = .{
+        .block = null,
+        .metaIndexRecords = metaIndex.records,
+        .tableHeader = tableHeader,
+        .currentI = 0,
+        .isRead = false,
+        // FIXME: PLS
+        .indexBuf = undefined,
+        .dataBuf = undefined,
+        .lensBuf = undefined,
+    };
+
+    std.debug.assert(r.tableHeader.blocksCount != 0);
+    std.debug.assert(r.tableHeader.itemsCount != 0);
+    return r;
+}
+
 pub fn deinit(self: *BlockReader, alloc: Allocator) void {
     if (self.block) |block| block.deinit(alloc);
 
+    for (self.metaIndexRecords) |*rec| rec.deinit(alloc);
     if (self.metaIndexRecords.len > 0) alloc.free(self.metaIndexRecords);
     if (self.blockHeaders.len > 0) alloc.free(self.blockHeaders);
     self.sb.deinit(alloc);
@@ -217,37 +251,6 @@ fn readNextBlockHeaders(self: *BlockReader, alloc: Allocator) !bool {
     self.blockHeaders = try BlockHeader.decodeMany(alloc, self.uncompressedBuf.items, mi.blockHeadersCount);
     self.blockHeaderI = 0;
     return true;
-}
-
-fn decodeMetaIndexRecords(alloc: Allocator, metaindexBuf: std.ArrayList(u8), blocksCount: usize) ![]MetaIndex {
-    const decomporessedSize = try encoding.getFrameContentSize(metaindexBuf.items);
-    const buf = try alloc.alloc(u8, decomporessedSize);
-    defer alloc.free(buf);
-    const bufOffset = try encoding.decompress(buf, metaindexBuf.items);
-
-    var records = try std.ArrayList(MetaIndex).initCapacity(alloc, blocksCount);
-    errdefer records.deinit(alloc);
-
-    var slice = buf[0..bufOffset];
-    var totalBlockHeaders: u64 = 0;
-    while (slice.len > 0) {
-        // TODO: test if holding them on heap is better,
-        // 1. create a mem pool to pop the objects quickly
-        // 2. change lessThan to use pointers
-        var rec: MetaIndex = undefined;
-        const n = rec.decode(slice);
-        slice = slice[n..];
-        totalBlockHeaders += rec.blockHeadersCount;
-        try records.append(alloc, rec);
-    }
-
-    std.debug.assert(totalBlockHeaders == blocksCount);
-    if (builtin.is_test) {
-        std.debug.assert(std.sort.isSorted(MetaIndex, records.items, {}, MetaIndex.lessThan));
-    }
-
-    // remap must be successful in most of the time since records is the last allocation
-    return records.toOwnedSlice(alloc);
 }
 
 const testing = std.testing;

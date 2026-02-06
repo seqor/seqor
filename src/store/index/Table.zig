@@ -11,12 +11,18 @@ const MetaIndex = @import("MetaIndex.zig");
 
 const Table = @This();
 
-// either one has to be available
+// either one has to be available,
+// NOTE: adding a third one like object table may complicated it,
+// so then it would require implement at able as an interface
 mem: ?*MemTable,
 disk: ?*DiskTable,
+
+// fields for all the tables
+tableHeader: *TableHeader,
 size: u64,
 path: []const u8,
 
+// state
 inMerge: bool = false,
 
 pub fn openAll(parentAlloc: Allocator, path: []const u8) !std.ArrayList(*Table) {
@@ -92,18 +98,10 @@ pub fn open(alloc: Allocator, path: []const u8) !*Table {
     var fba = std.heap.stackFallback(2048, alloc);
     const fbaAlloc = fba.get();
 
-    var ph = try TableHeader.readFile(alloc, path);
-    errdefer ph.deinit(alloc);
+    var tableHeader = try TableHeader.readFile(alloc, path);
+    errdefer tableHeader.deinit(alloc);
 
-    const metaindexPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.metaindex });
-    defer fbaAlloc.free(metaindexPath);
-    var metaindexFile = try std.fs.openFileAbsolute(metaindexPath, .{});
-    defer metaindexFile.close();
-    const metaindexStat = try metaindexFile.stat();
-    const metaindexCompressed = try metaindexFile.readToEndAlloc(alloc, @intCast(metaindexStat.size));
-    defer alloc.free(metaindexCompressed);
-
-    const decodedMetaindex = try MetaIndex.decodeDecompress(alloc, metaindexCompressed, ph.blocksCount);
+    const decodedMetaindex = try MetaIndex.readFile(alloc, path, tableHeader.blocksCount);
     errdefer if (decodedMetaindex.records.len > 0) alloc.free(decodedMetaindex.records);
 
     // TODO: open files in parallel to speed up work on high-latency storages, e.g. Ceph
@@ -125,11 +123,10 @@ pub fn open(alloc: Allocator, path: []const u8) !*Table {
     var lensFile = try std.fs.openFileAbsolute(lensPath, .{});
     errdefer lensFile.close();
     const lensSize = (try lensFile.stat()).size;
-
     const disk = try alloc.create(DiskTable);
     errdefer alloc.destroy(disk);
     disk.* = .{
-        .tableHeader = ph,
+        .tableHeader = tableHeader,
         .metaindexRecords = decodedMetaindex.records,
         .indexFile = indexFile,
         .entriesFile = entriesFile,
@@ -140,9 +137,11 @@ pub fn open(alloc: Allocator, path: []const u8) !*Table {
     table.* = .{
         .mem = null,
         .disk = disk,
-        .size = metaindexStat.size + indexSize + entriesSize + lensSize,
+        .size = decodedMetaindex.compressedSize + indexSize + entriesSize + lensSize,
         .path = path,
+        .tableHeader = undefined,
     };
+    table.tableHeader = &table.disk.?.tableHeader;
 
     return table;
 }
@@ -164,6 +163,7 @@ pub fn fromMem(alloc: Allocator, memTable: *MemTable) !*Table {
         .disk = null,
         .size = memTable.size(),
         .path = "",
+        .tableHeader = &memTable.tableHeader,
     };
 
     return table;

@@ -43,7 +43,7 @@ memTablesSem: std.Thread.Semaphore = .{
 },
 memTablesMx: std.Thread.Mutex = .{},
 tables: std.ArrayList(*Table),
-memTables: std.ArrayList(*MemTable),
+memTables: std.ArrayList(*Table),
 
 pool: *std.Thread.Pool,
 // wg holds all the running jobs
@@ -73,7 +73,7 @@ pub fn init(alloc: Allocator, path: []const u8) !*IndexRecorder {
         .n_jobs = conf.server.pools.workerThreads,
     });
 
-    var memTables = try std.ArrayList(*MemTable).initCapacity(alloc, maxMemTables);
+    var memTables = try std.ArrayList(*Table).initCapacity(alloc, maxMemTables);
     errdefer memTables.deinit(alloc);
 
     // TODO: move it to the config level
@@ -169,7 +169,8 @@ fn flushBlocksToMemTables(self: *IndexRecorder, alloc: Allocator, blocks: []*Mem
     // 1. returning a tail from merge
     // 2. identify tables for optimal merge in the loop over the tables
     const mergedMemTable = try mergeMemTables(alloc, memTables.items);
-    try self.addToMemTables(alloc, mergedMemTable, force);
+    const table = try Table.fromMem(alloc, mergedMemTable);
+    try self.addToMemTables(alloc, table, force);
 }
 
 /// merges mem tables to a bigger size ones
@@ -181,10 +182,10 @@ fn mergeMemTables(alloc: Allocator, memTables: []*MemTable) !*MemTable {
     std.debug.assert(memTables.len != 0);
     if (memTables.len == 1) return memTables[0];
 
-    return MemTable.mergeTables(alloc, memTables);
+    return MemTable.mergeMemTables(alloc, memTables);
 }
 
-fn addToMemTables(self: *IndexRecorder, alloc: Allocator, memTable: *MemTable, force: bool) !void {
+fn addToMemTables(self: *IndexRecorder, alloc: Allocator, memTable: *Table, force: bool) !void {
     var semaphoreWaited = false; // if not stopped then wait for an available semaphore
     if (!self.stopped.load(.acquire)) {
         self.memTablesSem.wait();
@@ -228,7 +229,7 @@ fn runMemTablesMerger(self: *IndexRecorder, alloc: Allocator) !void {
         }
 
         // TODO: make sure error.Stopped is handled on the upper level
-        try self.mergeTables(alloc, self.memTables, false);
+        try self.mergeTables(alloc, self.memTables.items, false);
     }
 }
 
@@ -242,7 +243,7 @@ pub fn mergeTables(
     tables: []*Table,
     force: bool,
 ) !void {
-    const tableKind = getDestinationTableKind(tables.items, force);
+    const tableKind = getDestinationTableKind(tables, force);
     var fba = std.heap.stackFallback(64, alloc);
     const fbaAlloc = fba.get();
     // 1 for / and 16 for 16 bytes of idx representation,
@@ -267,35 +268,35 @@ pub fn mergeTables(
     //     return;
     // }
 
-    var readers = try openTableReaders(alloc, self.memTables.items);
+    var readers = try openTableReaders(alloc, tables);
     defer {
         for (readers.items) |reader| reader.deinit(alloc);
         readers.deinit(alloc);
     }
 
-    var newMemTable: ?*MemTable = undefined;
-    var blockWriter: BlockWriter = undefined;
-    defer blockWriter.deinit(alloc);
-    if (tableKind == .mem) {
-        newMemTable = try MemTable.empty(alloc);
-        blockWriter = BlockWriter.initFromMemTable(newMemTable.?);
-    } else {
-        var sourceItemsCount: u64 = 0;
-        for (self.memTables.items) |table| {
-            sourceItemsCount += table.tableHeader.itemsCount;
-        }
-        // const toCache = sourceItemsCount <= maxItemsPerCachedTable();
-        // blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
-    }
-
-    try newMemTable.?.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
-    if (newMemTable) |memTable| {
-        _ = memTable;
-        newMemTable = try MemTable.empty(alloc);
-    }
-
-    const newTable = openCreatedTable(destinationTablePath, self.memTables.items, newMemTable.?);
-    try self.swapTables(alloc, newTable, tableKind);
+    // var newMemTable: ?*MemTable = undefined;
+    // var blockWriter: BlockWriter = undefined;
+    // defer blockWriter.deinit(alloc);
+    // if (tableKind == .mem) {
+    //     newMemTable = try MemTable.empty(alloc);
+    //     blockWriter = BlockWriter.initFromMemTable(newMemTable.?);
+    // } else {
+    //     var sourceItemsCount: u64 = 0;
+    //     for (tables) |table| {
+    //         sourceItemsCount += table.tableHeader.itemsCount;
+    //     }
+    //     // const toCache = sourceItemsCount <= maxItemsPerCachedTable();
+    //     // blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
+    // }
+    //
+    // try newMemTable.?.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
+    // if (newMemTable) |memTable| {
+    //     _ = memTable;
+    //     newMemTable = try MemTable.empty(alloc);
+    // }
+    //
+    // const newTable = openCreatedTable(destinationTablePath, self.memTables.items, newMemTable.?);
+    // try self.swapTables(alloc, newTable, tableKind);
 }
 
 // TODO: implement it, at the moment it does only mem tables merging
@@ -334,7 +335,7 @@ fn areTablesMem(tables: []*Table) bool {
     return true;
 }
 
-fn getTablesSize(tables: []*MemTable) u64 {
+fn getTablesSize(tables: []*Table) u64 {
     var n: u64 = 0;
     for (tables) |table| {
         n += table.size;
@@ -350,17 +351,20 @@ fn maxItemsPerCachedTable() u64 {
     return @max(restMem / (4 * blocksInMemTable), minMemTableSize);
 }
 
-fn openTableReaders(alloc: Allocator, tables: []*MemTable) !std.ArrayList(*BlockReader) {
+fn openTableReaders(alloc: Allocator, tables: []*Table) !std.ArrayList(*BlockReader) {
     var readers = try std.ArrayList(*BlockReader).initCapacity(alloc, tables.len);
     defer {
         for (readers.items) |reader| reader.deinit(alloc);
         readers.deinit(alloc);
     }
     for (tables) |table| {
-        // TODO: it must support opening from file as well,
-        // but it requires accepting not only a mem table, but a disk table
-        const reader = try BlockReader.initFromMemTable(alloc, table);
-        readers.appendAssumeCapacity(reader);
+        if (table.mem) |memTable| {
+            const reader = try BlockReader.initFromMemTable(alloc, memTable);
+            readers.appendAssumeCapacity(reader);
+        } else {
+            const reader = try BlockReader.initFromDiskTable(alloc, table.path);
+            readers.appendAssumeCapacity(reader);
+        }
     }
 
     return readers;
