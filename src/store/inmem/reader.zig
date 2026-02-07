@@ -369,7 +369,9 @@ fn testReadBlock(allocator: std.mem.Allocator) !void {
     };
     populateSampleLines(&sample);
 
-    // unordered timestamps in lines so that it tests its sorting
+    // Unordered timestamps in lines so that it tests sorting.
+    // line[0]: ts=1, sid=(2,"2222"); line[1]: ts=2, sid=(1,"1111"); line[2]: ts=3, sid=(1,"1111")
+    // After sort by (sid, ts): first block (1111,1) 2 rows (ts 2,3), second block (2222,2) 1 row (ts 1).
     var lines = [3]*const Line{
         &sample.lines[0],
         &sample.lines[1],
@@ -380,14 +382,61 @@ fn testReadBlock(allocator: std.mem.Allocator) !void {
     defer memTable.deinit(allocator);
     try memTable.addLines(allocator, lines[0..]);
 
+    const th = memTable.tableHeader;
+    try std.testing.expectEqual(@as(u32, 3), th.len);
+    try std.testing.expect(th.minTimestamp <= 1);
+    try std.testing.expect(th.maxTimestamp >= 3);
+    try std.testing.expect(th.blocksCount >= 1);
+    try std.testing.expect(th.uncompressedSize > 0);
+    try std.testing.expect(th.compressedSize > 0);
+
     const blockReader = try BlockReader.initFromTableMem(allocator, memTable);
     defer blockReader.deinit(allocator);
 
-    var i: u32 = 0;
+    var blocksRead: u32 = 0;
     while (try blockReader.NextBlock(allocator)) {
-        i += 1;
+        blocksRead += 1;
     }
 
-    try std.testing.expectEqual(2, i);
-    try std.testing.expectEqual(1, 1);
+    try std.testing.expectEqual(@as(u32, 2), blocksRead);
+    try std.testing.expectEqual(@as(u64, 2), blockReader.globalBlocksCount);
+    try std.testing.expectEqual(@as(u64, 3), blockReader.globalRowsCount);
+    try std.testing.expectEqual(th.uncompressedSize, blockReader.globalUncompressedSizeBytes);
+    try std.testing.expectEqual(th.len, blockReader.globalRowsCount);
+    try std.testing.expectEqual(th.blocksCount, blockReader.globalBlocksCount);
+    try std.testing.expectEqual(th.compressedSize, blockReader.streamReader.totalBytesRead());
+
+    // Second pass: check each block's blockData (sid, rowsCount, timestamps range)
+    const blockReader2 = try BlockReader.initFromTableMem(allocator, memTable);
+    defer blockReader2.deinit(allocator);
+
+    var block1Sid1111 = false;
+    var block2Sid2222 = false;
+    var blocksWithFullData: u32 = 0;
+    while (try blockReader2.NextBlock(allocator)) {
+        const bd = &blockReader2.blockData;
+        try std.testing.expect(bd.rowsCount >= 1);
+        try std.testing.expect(bd.uncompressedSizeBytes > 0);
+        try std.testing.expect(bd.timestampsData.minTimestamp <= bd.timestampsData.maxTimestamp);
+        // columnsData may be empty in allocation-failure runs from checkAllocationFailures
+        if (bd.columnsData.items.len >= 2) {
+            blocksWithFullData += 1;
+            if (std.mem.eql(u8, bd.sid.tenantID, "1111") and bd.sid.id == 1) {
+                try std.testing.expectEqual(@as(u32, 2), bd.rowsCount);
+                try std.testing.expectEqual(@as(u64, 2), bd.timestampsData.minTimestamp);
+                try std.testing.expectEqual(@as(u64, 3), bd.timestampsData.maxTimestamp);
+                block1Sid1111 = true;
+            } else if (std.mem.eql(u8, bd.sid.tenantID, "2222") and bd.sid.id == 2) {
+                try std.testing.expectEqual(@as(u32, 1), bd.rowsCount);
+                try std.testing.expectEqual(@as(u64, 1), bd.timestampsData.minTimestamp);
+                try std.testing.expectEqual(@as(u64, 1), bd.timestampsData.maxTimestamp);
+                block2Sid2222 = true;
+            }
+        }
+    }
+    // When both blocks were read with full data (no alloc failure), both sids must be present
+    if (blocksWithFullData == 2) {
+        try std.testing.expect(block1Sid1111);
+        try std.testing.expect(block2Sid2222);
+    }
 }
