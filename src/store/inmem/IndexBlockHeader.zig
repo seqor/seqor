@@ -155,8 +155,15 @@ pub fn ReadIndexBlockHeaders(
 }
 
 fn validateIndexBlockHeaders(headers: []const Self) !void {
-    // TODO: implement it
-    _ = headers;
+    for (1..headers.len) |i| {
+        if (headers[i].sid.lessThan(&headers[i - 1].sid)) {
+            std.log.err(
+                "unexpected indexBlockHeader with smaller streamID after bigger streamID at index {}",
+                .{i},
+            );
+            return error.InvalidIndexBlockHeaderOrder;
+        }
+    }
 }
 
 pub fn mustReadNextIndexBlock(
@@ -212,6 +219,7 @@ pub const Error = error{
     InvalidIndexBlockSize,
     InvalidIndexBlockOffset,
     InvalidIndexBlockData,
+    InvalidIndexBlockHeaderOrder,
     DecompressionSizeMismatch,
 };
 
