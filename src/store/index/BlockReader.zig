@@ -4,6 +4,9 @@ const builtin = @import("builtin");
 
 const encoding = @import("encoding");
 
+const Filenames = @import("../../Filenames.zig");
+const fs = @import("../../fs.zig");
+
 const MemBlock = @import("MemBlock.zig");
 const MemTable = @import("MemTable.zig");
 const MetaIndex = @import("MetaIndex.zig");
@@ -107,6 +110,10 @@ pub fn initFromMemTable(alloc: Allocator, memTable: *MemTable) !*BlockReader {
     return r;
 }
 
+// TODO: this part must be already open by Table,
+// either document why we can't reuse the file to read,
+// or pass pointer to the open buffers,
+// most likely it will require tracking of the usages of those files/buffers
 pub fn initFromDiskTable(alloc: Allocator, path: []const u8) !*BlockReader {
     const tableHeader = try TableHeader.readFile(alloc, path);
     errdefer tableHeader.deinit(alloc);
@@ -119,7 +126,21 @@ pub fn initFromDiskTable(alloc: Allocator, path: []const u8) !*BlockReader {
         alloc.free(metaIndex.records);
     }
 
-    // FIXME: open all the files here
+    var fba = std.heap.stackFallback(512, alloc);
+    const fbaAlloc = fba.get();
+
+    // TODO: open files in parallel to speed up work on high-latency storages, e.g. Ceph
+    const indexPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.index });
+    defer fbaAlloc.free(indexPath);
+    const entriesPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.entries });
+    defer fbaAlloc.free(entriesPath);
+    const lensPath = try std.fs.path.join(fbaAlloc, &.{ path, Filenames.lens });
+    defer fbaAlloc.free(lensPath);
+
+    const indexBuf = try fs.readAll(alloc, indexPath);
+    const entriesBuf = try fs.readAll(alloc, entriesPath);
+    const lensBuf = try fs.readAll(alloc, lensPath);
+
     const r = try alloc.create(BlockReader);
     r.* = .{
         .block = null,
@@ -127,10 +148,9 @@ pub fn initFromDiskTable(alloc: Allocator, path: []const u8) !*BlockReader {
         .tableHeader = tableHeader,
         .currentI = 0,
         .isRead = false,
-        // FIXME: PLS
-        .indexBuf = undefined,
-        .dataBuf = undefined,
-        .lensBuf = undefined,
+        .indexBuf = .initBuffer(indexBuf),
+        .dataBuf = .initBuffer(entriesBuf),
+        .lensBuf = .initBuffer(lensBuf),
     };
 
     std.debug.assert(r.tableHeader.blocksCount != 0);

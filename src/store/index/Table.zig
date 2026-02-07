@@ -95,7 +95,7 @@ pub fn openAll(parentAlloc: Allocator, path: []const u8) !std.ArrayList(*Table) 
 }
 
 pub fn open(alloc: Allocator, path: []const u8) !*Table {
-    var fba = std.heap.stackFallback(2048, alloc);
+    var fba = std.heap.stackFallback(512, alloc);
     const fbaAlloc = fba.get();
 
     var tableHeader = try TableHeader.readFile(alloc, path);
