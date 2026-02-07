@@ -246,17 +246,19 @@ pub fn mergeTables(
     const tableKind = getDestinationTableKind(tables, force);
     var fba = std.heap.stackFallback(64, alloc);
     const fbaAlloc = fba.get();
+
     // 1 for / and 16 for 16 bytes of idx representation,
     // we can't bitcast it to [8]u8 because we need human readlable file names
-    var destinationTablePath = try fbaAlloc.alloc(u8, self.path.len + 1 + 16);
-    defer fbaAlloc.free(destinationTablePath);
+    var destinationTablePath: []u8 = "";
+    defer if (destinationTablePath.len > 0) fbaAlloc.free(destinationTablePath);
     if (tableKind == .file) {
+        destinationTablePath = try fbaAlloc.alloc(u8, self.path.len + 1 + 16);
         const idx = self.nextMergeIdx();
-        var idxPathBuf: [16]u8 = undefined;
-        _ = try std.fmt.bufPrint(&idxPathBuf, "{x:0>16}", .{idx});
-        @memcpy(destinationTablePath[0..self.path.len], self.path);
-        destinationTablePath[self.path.len] = '/';
-        @memcpy(destinationTablePath[self.path.len + 1 ..], idxPathBuf[0..]);
+        _ = try std.fmt.bufPrint(
+            destinationTablePath,
+            "{s}/{X:0>16}",
+            .{ self.path, idx },
+        );
     }
 
     // FIXME: implement a shutdown path
