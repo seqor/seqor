@@ -276,21 +276,21 @@ pub fn mergeTables(
         readers.deinit(alloc);
     }
 
-    // var newMemTable: ?*MemTable = undefined;
-    // var blockWriter: BlockWriter = undefined;
-    // defer blockWriter.deinit(alloc);
-    // if (tableKind == .mem) {
-    //     newMemTable = try MemTable.empty(alloc);
-    //     blockWriter = BlockWriter.initFromMemTable(newMemTable.?);
-    // } else {
-    //     var sourceItemsCount: u64 = 0;
-    //     for (tables) |table| {
-    //         sourceItemsCount += table.tableHeader.itemsCount;
-    //     }
-    //     // const toCache = sourceItemsCount <= maxItemsPerCachedTable();
-    //     // blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
-    // }
-    //
+    var newMemTable: ?*MemTable = null;
+    var blockWriter: BlockWriter = undefined;
+    defer blockWriter.deinit(alloc);
+    if (tableKind == .mem) {
+        newMemTable = try MemTable.empty(alloc);
+        blockWriter = BlockWriter.initFromMemTable(newMemTable.?);
+    } else {
+        var sourceItemsCount: u64 = 0;
+        for (tables) |table| {
+            sourceItemsCount += table.tableHeader.itemsCount;
+        }
+        const toCache = sourceItemsCount <= maxItemsPerCachedTable();
+        blockWriter = BlockWriter.initFromDiskTable(destinationTablePath, toCache);
+    }
+
     // try newMemTable.?.mergeBlocks(alloc, destinationTablePath, &blockWriter, &readers, &self.stopped);
     // if (newMemTable) |memTable| {
     //     _ = memTable;

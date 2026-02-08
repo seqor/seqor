@@ -111,8 +111,8 @@ pub fn initFromMemTable(alloc: Allocator, memTable: *MemTable) !*BlockReader {
 }
 
 // TODO: this part must be already open by Table,
-// either document why we can't reuse the file to read,
-// or pass pointer to the open buffers,
+// we don't reuse it because open tables are used for random access,
+// but if we can identify it's not used by readers we could lock them here,
 // most likely it will require tracking of the usages of those files/buffers
 pub fn initFromDiskTable(alloc: Allocator, path: []const u8) !*BlockReader {
     const tableHeader = try TableHeader.readFile(alloc, path);
