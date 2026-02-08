@@ -261,6 +261,7 @@ pub const Data = struct {
         _ = self;
         _ = allocator;
 
+        // TODO: implement a decision strategy
         return PartType.inmemory;
     }
 
@@ -281,11 +282,10 @@ pub const Data = struct {
     }
 
     fn timer() std.time.Timer {
-        return std.time.Timer.start() catch unreachable;
+        return std.time.Timer.start() catch |err| std.debug.panic("failed to start timer: {s}", .{@errorName(err)});
     }
 
-    fn openBlockStreamReaders(self: *Data, allocator: std.mem.Allocator) ![]*BlockReader {
-        _ = self;
+    fn openBlockStreamReaders(allocator: std.mem.Allocator) ![]*BlockReader {
         const readers = try allocator.alloc(*BlockReader, 1);
         return readers;
     }
@@ -321,7 +321,7 @@ pub const Data = struct {
             .big => {},
         }
         const mergeIdx = self.nextMergeIdx();
-        const readers = self.openBlockStreamReaders(alloc) catch std.debug.panic("failed to open block readers", .{});
+        const readers = openBlockStreamReaders(alloc) catch std.debug.panic("failed to open block readers", .{});
         _ = readers;
         //
         const dstPathPart = self.getDstPartPath(alloc, dstPartType, mergeIdx) catch std.debug.panic("path problem dstPathPart", .{});

@@ -32,8 +32,12 @@ pub fn init(allocator: std.mem.Allocator) !*Self {
 }
 
 pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-    self.sid.deinit(allocator);
+    self.deinitRead(allocator);
     allocator.destroy(self);
+}
+
+pub fn deinitRead(self: *Self, allocator: std.mem.Allocator) void {
+    self.sid.deinit(allocator);
 }
 
 pub fn writeIndexBlock(
@@ -134,7 +138,7 @@ pub fn ReadIndexBlockHeaders(
     var dst = try allocator.alloc(Self, count);
     var i: usize = 0;
     errdefer {
-        for (dst[0..i]) |*reader| reader.deinit(allocator);
+        for (dst[0..i]) |*reader| reader.deinitRead(allocator);
         allocator.free(dst);
     }
 

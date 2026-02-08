@@ -131,7 +131,7 @@ pub const BlockReader = struct {
     pub fn initFromTableMem(allocator: std.mem.Allocator, tableMem: *TableMem) !*BlockReader {
         const indexBlockHeaders = try IndexBlockHeader.ReadIndexBlockHeaders(allocator, tableMem.streamWriter.metaIndexBuf.items);
         errdefer {
-            for (indexBlockHeaders) |*h| h.deinit(allocator);
+            for (indexBlockHeaders) |*h| h.deinitRead(allocator);
             allocator.free(indexBlockHeaders);
         }
 
@@ -177,7 +177,7 @@ pub const BlockReader = struct {
         self.blockData.deinit(allocator);
 
         for (self.indexBlockHeaders) |*bh| {
-            bh.deinit(allocator);
+            bh.deinitRead(allocator);
         }
         allocator.free(self.indexBlockHeaders);
 
