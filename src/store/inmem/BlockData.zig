@@ -9,14 +9,11 @@ const ColumnsHeader = @import("block_header.zig").ColumnsHeader;
 const ColumnsHeaderIndex = @import("ColumnsHeaderIndex.zig");
 const ColumnDict = @import("ColumnDict.zig");
 const ColumnType = @import("block_header.zig").ColumnType;
-const ColumnIDGen = @import("ColumnIDGen.zig");
 const EncodingType = @import("TimestampsEncoder.zig").EncodingType;
-const StreamWriter = @import("StreamWriter.zig");
 const StreamReader = @import("reader.zig").StreamReader;
 
 const maxTimestampsBlockSize = 8 * 1024 * 1024;
 const maxValuesBlockSize = 8 * 1024 * 1024;
-const maxBloomFilterBlockSize = 8 * 1024 * 1024;
 const maxColumnsHeaderSize = 8 * 1024 * 1024;
 const maxColumnsHeaderIndexSize = 8 * 1024 * 1024;
 
@@ -168,18 +165,4 @@ pub const ColumnData = struct {
             .bloomFilterData = bloomFilterData,
         };
     }
-};
-
-// Error types
-pub const Error = error{
-    InvalidColumnsHeaderOffset,
-    InvalidColumnsHeaderIndexOffset,
-    InvalidColumnsHeaderSize,
-    InvalidColumnsHeaderIndexSize,
-    InvalidTimestampsSize,
-    InvalidTimestampsOffset,
-    InvalidValuesSize,
-    InvalidBloomFilterSize,
-    InvalidColumnOffset,
-    InvalidBloomFilterOffset,
 };

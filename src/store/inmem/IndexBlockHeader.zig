@@ -112,7 +112,7 @@ pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) !Self {
     };
 }
 
-pub fn ReadIndexBlockHeaders(
+pub fn readIndexBlockHeaders(
     allocator: std.mem.Allocator,
     compressed: []const u8,
 ) ![]Self {
@@ -193,14 +193,6 @@ pub fn mustReadNextIndexBlock(
     // Update bytes read position
     // streamReader.indexBytesRead.* += indexBlockSize;
 }
-
-pub const Error = error{
-    InvalidIndexBlockSize,
-    InvalidIndexBlockOffset,
-    InvalidIndexBlockData,
-    InvalidIndexBlockHeaderOrder,
-    DecompressionSizeMismatch,
-};
 
 test "IndexBlockHeaderEncode" {
     const Case = struct {

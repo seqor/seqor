@@ -7,18 +7,6 @@ const TableMem = @import("TableMem.zig");
 const BlockData = @import("BlockData.zig").BlockData;
 const ColumnIDGen = @import("ColumnIDGen.zig");
 
-pub const Error = error{
-    InvalidBlockOrder,
-    InvalidTimestampOrder,
-    InvalidTimestampRange,
-    InvalidSize,
-    InvalidRowCount,
-    InvalidBlockCount,
-    InvalidCompressedSize,
-    InvalidUncompressedSize,
-    InvalidIndexBlockData,
-};
-
 // TODO: check maybe i don't need allocator.create
 pub const StreamReader = struct {
     timestampsBuf: []const u8,
@@ -126,7 +114,10 @@ pub const BlockReader = struct {
     blockData: BlockData,
 
     pub fn initFromTableMem(allocator: std.mem.Allocator, tableMem: *TableMem) !*BlockReader {
-        const indexBlockHeaders = try IndexBlockHeader.ReadIndexBlockHeaders(allocator, tableMem.streamWriter.metaIndexBuf.items);
+        const indexBlockHeaders = try IndexBlockHeader.readIndexBlockHeaders(
+            allocator,
+            tableMem.streamWriter.metaIndexBuf.items,
+        );
         errdefer {
             for (indexBlockHeaders) |*h| h.deinitSIDAlloc(allocator);
             allocator.free(indexBlockHeaders);
@@ -181,10 +172,10 @@ pub const BlockReader = struct {
         allocator.destroy(self);
     }
 
-    /// NextBlock reads the next block from the reader and puts it into blockData.
+    /// nextBlock reads the next block from the reader and puts it into blockData.
     /// Returns false if there are no more blocks.
     /// blockData is valid until the next call to NextBlock().
-    pub fn NextBlock(self: *BlockReader, allocator: std.mem.Allocator) !bool {
+    pub fn nextBlock(self: *BlockReader, allocator: std.mem.Allocator) !bool {
         // Load more blocks if needed
         while (self.nextBlockIdx >= self.blockHeaders.items.len) {
             if (!try self.nextIndexBlock(allocator)) {
@@ -347,7 +338,7 @@ fn testReadBlock(allocator: std.mem.Allocator) !void {
     defer blockReader.deinit(allocator);
 
     var blocksRead: u32 = 0;
-    while (try blockReader.NextBlock(allocator)) {
+    while (try blockReader.nextBlock(allocator)) {
         blocksRead += 1;
     }
 
@@ -366,7 +357,7 @@ fn testReadBlock(allocator: std.mem.Allocator) !void {
     var block1Sid1111 = false;
     var block2Sid2222 = false;
     var blocksWithFullData: u32 = 0;
-    while (try blockReader2.NextBlock(allocator)) {
+    while (try blockReader2.nextBlock(allocator)) {
         const bd = &blockReader2.blockData;
         try std.testing.expect(bd.rowsCount >= 1);
         try std.testing.expect(bd.uncompressedSizeBytes > 0);
