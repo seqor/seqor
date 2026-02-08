@@ -39,10 +39,8 @@ pub fn readPadded(self: *Self, totalSize: usize) []const u8 {
 }
 
 pub fn readPaddedToBuf(self: *Self, totalSize: usize, tenantBuf: []u8) void {
-    const bytes = self.readBytes(totalSize);
-    // Find the length of actual content (before padding zeros)
-    const len = std.mem.indexOfScalar(u8, bytes, 0) orelse totalSize;
-    @memcpy(tenantBuf[0..len], bytes[0..len]);
+    const src = self.readPadded(totalSize);
+    @memcpy(tenantBuf[0..src.len], src);
 }
 
 pub fn readVarInt(self: *Self) u64 {
