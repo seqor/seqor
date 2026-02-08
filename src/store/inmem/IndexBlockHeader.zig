@@ -128,9 +128,7 @@ pub fn ReadIndexBlockHeaders(
         compressed,
     );
 
-    if (decompressed.len % encodeExpectedSize != 0) {
-        return error.InvalidIndexBlockHeadersSize;
-    }
+    std.debug.assert(decompressed.len % encodeExpectedSize == 0);
 
     const count = decompressed.len / encodeExpectedSize;
 
@@ -149,20 +147,15 @@ pub fn ReadIndexBlockHeaders(
         dst[i] = try decodeAlloc(allocator, decompressed[off .. off + encodeExpectedSize]);
     }
 
-    try validateIndexBlockHeaders(dst);
+    validateIndexBlockHeaders(dst);
 
     return dst;
 }
 
-fn validateIndexBlockHeaders(headers: []const Self) !void {
+// TODO: consider to move it under builtin.is_test condition
+fn validateIndexBlockHeaders(headers: []const Self) void {
     for (1..headers.len) |i| {
-        if (headers[i].sid.lessThan(&headers[i - 1].sid)) {
-            std.log.err(
-                "unexpected indexBlockHeader with smaller streamID after bigger streamID at index {}",
-                .{i},
-            );
-            return error.InvalidIndexBlockHeaderOrder;
-        }
+        std.debug.assert(!headers[i].sid.lessThan(&headers[i - 1].sid));
     }
 }
 
@@ -175,24 +168,13 @@ pub fn mustReadNextIndexBlock(
     const indexBlockSize = self.size;
 
     // Validate indexBlockSize
-    if (indexBlockSize > maxIndexBlockSize) {
-        std.log.err("FATAL: indexBlockHeader.indexBlockSize={} cannot exceed {} bytes", .{ indexBlockSize, maxIndexBlockSize });
-        return error.InvalidIndexBlockSize;
-    }
+    std.debug.assert(indexBlockSize <= maxIndexBlockSize);
 
     // Validate that offset matches current read position (sequential reading)
     // if (self.offset != streamReader.indexBytesRead.*) {
     //     std.log.err("FATAL: indexBlockHeader.offset={} must equal to {}", .{ self.offset, streamReader.indexBytesRead.* });
     //     return error.InvalidIndexBlockOffset;
     // }
-
-    // Bounds checking
-    if (self.offset > indexBuf.len) {
-        return error.InvalidIndexBlockOffset;
-    }
-    if (self.offset + indexBlockSize > indexBuf.len) {
-        return error.InvalidIndexBlockData;
-    }
 
     // Read compressed data
     const compressed = indexBuf[self.offset..][0..indexBlockSize];
@@ -206,10 +188,7 @@ pub fn mustReadNextIndexBlock(
 
     // Decompress
     const actualDecompressedSize = try encoding.decompress(dst.items, compressed);
-    if (actualDecompressedSize != decompressedSize) {
-        std.log.err("FATAL: cannot decompress indexBlock read at offset {} with size {}: decompressed size mismatch", .{ self.offset, indexBlockSize });
-        return error.DecompressionSizeMismatch;
-    }
+    std.debug.assert(actualDecompressedSize == decompressedSize);
 
     // Update bytes read position
     // streamReader.indexBytesRead.* += indexBlockSize;

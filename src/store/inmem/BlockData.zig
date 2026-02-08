@@ -62,44 +62,14 @@ pub const BlockData = struct {
         self.timestampsData = try TimestampsData.readFrom(&bh.timestampsHeader, sr);
 
         const columnsHeaderSize = bh.columnsHeaderSize;
-        if (columnsHeaderSize > maxColumnsHeaderSize) {
-            std.log.err(
-                "BUG: too big columnsHeaderSize: {} bytes; mustn't exceed {} bytes",
-                .{ columnsHeaderSize, maxColumnsHeaderSize },
-            );
-            return error.InvalidColumnsHeaderSize;
-        }
-
-        if (bh.columnsHeaderOffset + columnsHeaderSize >
-            sr.columnsHeaderBuf.len)
-        {
-            std.log.err(
-                "FATAL: columnsHeaderOffset={} + columnsHeaderSize={} exceeds buffer size: {}",
-                .{ bh.columnsHeaderOffset, columnsHeaderSize, sr.columnsHeaderBuf.len },
-            );
-            return error.InvalidColumnsHeaderOffset;
-        }
+        std.debug.assert(columnsHeaderSize <= maxColumnsHeaderSize);
 
         const columnsHeaderBuf =
             sr.columnsHeaderBuf[bh.columnsHeaderOffset..][0..columnsHeaderSize];
 
         // --- index ---
         const columnsHeaderIndexSize = bh.columnsHeaderIndexSize;
-        if (columnsHeaderIndexSize > maxColumnsHeaderIndexSize) {
-            std.log.err(
-                "BUG: too big columnsHeaderIndexSize: {} bytes; mustn't exceed {} bytes",
-                .{ columnsHeaderIndexSize, maxColumnsHeaderIndexSize },
-            );
-            return error.InvalidColumnsHeaderIndexSize;
-        }
-
-        if (bh.columnsHeaderIndexOffset + columnsHeaderIndexSize > sr.columnsHeaderIndexBuf.len) {
-            std.log.err(
-                "FATAL: columnsHeaderIndexOffset={} + columnsHeaderIndexSize={} exceeds buffer size: {}",
-                .{ bh.columnsHeaderIndexOffset, columnsHeaderIndexSize, sr.columnsHeaderIndexBuf.len },
-            );
-            return error.InvalidColumnsHeaderIndexOffset;
-        }
+        std.debug.assert(columnsHeaderIndexSize <= maxColumnsHeaderIndexSize);
 
         const columnsHeaderIndexBuf = sr.columnsHeaderIndexBuf[bh.columnsHeaderIndexOffset..][0..columnsHeaderIndexSize];
 
@@ -142,21 +112,7 @@ pub const TimestampsData = struct {
         sr: *const StreamReader,
     ) !TimestampsData {
         const timestampsBlockSize = th.size;
-        if (timestampsBlockSize > maxTimestampsBlockSize) {
-            std.log.err(
-                "FATAL: too big timestamps block with {} bytes; the maximum supported block size is {} bytes",
-                .{ timestampsBlockSize, maxTimestampsBlockSize },
-            );
-            return error.InvalidTimestampsSize;
-        }
-
-        if (th.offset + timestampsBlockSize > sr.timestampsBuf.len) {
-            std.log.err(
-                "FATAL: timestampsHeader.offset={} + size={} exceeds buffer size: {}",
-                .{ th.offset, timestampsBlockSize, sr.timestampsBuf.len },
-            );
-            return error.InvalidTimestampsOffset;
-        }
+        std.debug.assert(timestampsBlockSize <= maxTimestampsBlockSize);
 
         return .{
             .data = sr.timestampsBuf[th.offset..][0..timestampsBlockSize],
@@ -183,25 +139,11 @@ pub const ColumnData = struct {
         ch: *const ColumnHeader,
         sr: *const StreamReader,
     ) !ColumnData {
-        const colID = sr.columnIDGen.keyIDs.get(ch.key) orelse return error.KeyNotFound;
-        const bloomBufI = sr.colIdx.get(colID) orelse return error.ColumnNotFound;
-
-        if (bloomBufI >= sr.bloomValuesList.len) {
-            std.log.err(
-                "FATAL: bloomBufI={} exceeds bloomValuesList length: {}",
-                .{ bloomBufI, sr.bloomValuesList.len },
-            );
-            return error.InvalidColumnOffset;
-        }
+        const colID = sr.columnIDGen.keyIDs.get(ch.key).?;
+        const bloomBufI = sr.colIdx.get(colID).?;
 
         const valuesSize = ch.size;
-        if (valuesSize > maxValuesBlockSize) {
-            std.log.err(
-                "FATAL: values block size cannot exceed {} bytes; got {} bytes",
-                .{ maxValuesBlockSize, valuesSize },
-            );
-            return error.InvalidValuesSize;
-        }
+        std.debug.assert(valuesSize <= maxValuesBlockSize);
 
         const bloomValuesBuf = sr.bloomValuesList[bloomBufI];
         const valuesData = bloomValuesBuf[ch.offset..][0..valuesSize];

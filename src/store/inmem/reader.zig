@@ -198,26 +198,14 @@ pub const BlockReader = struct {
 
         // Validate bh
         if (self.sidLast) |sidLast| {
-            if (bh.sid.lessThan(&sidLast)) {
-                std.log.err("FATAL: blockHeader.streamID cannot be smaller than the streamID from the previously read block", .{});
-                return error.InvalidBlockOrder;
-            }
-            if (bh.sid.eql(&sidLast) and th.min < self.minTimestampLast) {
-                std.log.err("FATAL: timestamps.minTimestamp={} cannot be smaller than the minTimestamp for the previously read block for the same streamID: {}", .{ th.min, self.minTimestampLast });
-                return error.InvalidTimestampOrder;
-            }
+            std.debug.assert(!bh.sid.lessThan(&sidLast));
+            std.debug.assert(!bh.sid.eql(&sidLast) or th.min >= self.minTimestampLast);
         }
         self.minTimestampLast = th.min;
         self.sidLast = bh.sid;
 
-        if (th.min < ih.minTs) {
-            std.log.err("FATAL: timestampsHeader.minTimestamp={} cannot be smaller than indexBlockHeader.minTimestamp={}", .{ th.min, ih.minTs });
-            return error.InvalidTimestampRange;
-        }
-        if (th.max > ih.maxTs) {
-            std.log.err("FATAL: timestampsHeader.maxTimestamp={} cannot be bigger than indexBlockHeader.maxTimestamp={}", .{ th.max, ih.maxTs });
-            return error.InvalidTimestampRange;
-        }
+        std.debug.assert(th.min >= ih.minTs);
+        std.debug.assert(th.max <= ih.maxTs);
 
         try self.blockData.readFrom(allocator, bh, self.streamReader);
 
@@ -226,18 +214,9 @@ pub const BlockReader = struct {
         self.globalBlocksCount += 1;
 
         // Validate against tableHeader
-        if (self.globalUncompressedSizeBytes > self.tableHeader.uncompressedSize) {
-            std.log.err("FATAL: too big size of entries read: {}; mustn't exceed tableHeader.uncompressedSize={}", .{ self.globalUncompressedSizeBytes, self.tableHeader.uncompressedSize });
-            return error.InvalidSize;
-        }
-        if (self.globalRowsCount > self.tableHeader.len) {
-            std.log.err("FATAL: too many log entries read so far: {}; mustn't exceed tableHeader.len={}", .{ self.globalRowsCount, self.tableHeader.len });
-            return error.InvalidRowCount;
-        }
-        if (self.globalBlocksCount > self.tableHeader.blocksCount) {
-            std.log.err("FATAL: too many blocks read so far: {}; mustn't exceed tableHeader.blocksCount={}", .{ self.globalBlocksCount, self.tableHeader.blocksCount });
-            return error.InvalidBlockCount;
-        }
+        std.debug.assert(self.globalUncompressedSizeBytes <= self.tableHeader.uncompressedSize);
+        std.debug.assert(self.globalRowsCount <= self.tableHeader.len);
+        std.debug.assert(self.globalBlocksCount <= self.tableHeader.blocksCount);
 
         // The block has been successfully read
         self.nextBlockIdx += 1;
@@ -249,36 +228,18 @@ pub const BlockReader = struct {
             // No more blocks left
             // Validate tableHeader
             const totalBytesRead = self.streamReader.totalBytesRead();
-            if (self.tableHeader.compressedSize != totalBytesRead) {
-                std.log.err("FATAL: tableHeader.compressedSize={} must match the size of data read: {}", .{ self.tableHeader.compressedSize, totalBytesRead });
-                return error.InvalidCompressedSize;
-            }
-            if (self.tableHeader.uncompressedSize != self.globalUncompressedSizeBytes) {
-                std.log.err("FATAL: tableHeader.uncompressedSize={} must match the size of entries read: {}", .{ self.tableHeader.uncompressedSize, self.globalUncompressedSizeBytes });
-                return error.InvalidUncompressedSize;
-            }
-            if (self.tableHeader.len != self.globalRowsCount) {
-                std.log.err("FATAL: tableHeader.len={} must match the number of log entries read: {}", .{ self.tableHeader.len, self.globalRowsCount });
-                return error.InvalidRowCount;
-            }
-            if (self.tableHeader.blocksCount != self.globalBlocksCount) {
-                std.log.err("FATAL: tableHeader.blocksCount={} must match the number of blocks read: {}", .{ self.tableHeader.blocksCount, self.globalBlocksCount });
-                return error.InvalidBlockCount;
-            }
+            std.debug.assert(self.tableHeader.compressedSize == totalBytesRead);
+            std.debug.assert(self.tableHeader.uncompressedSize == self.globalUncompressedSizeBytes);
+            std.debug.assert(self.tableHeader.len == self.globalRowsCount);
+            std.debug.assert(self.tableHeader.blocksCount == self.globalBlocksCount);
             return false;
         }
 
         const ih = &self.indexBlockHeaders[self.nextIndexBlockIdx];
 
         // Validate ih
-        if (ih.minTs < self.tableHeader.minTimestamp) {
-            std.log.err("FATAL: indexBlockHeader.minTimestamp={} cannot be smaller than tableHeader.minTimestamp={}", .{ ih.minTs, self.tableHeader.minTimestamp });
-            return error.InvalidTimestampRange;
-        }
-        if (ih.maxTs > self.tableHeader.maxTimestamp) {
-            std.log.err("FATAL: indexBlockHeader.maxTimestamp={} cannot be bigger than tableHeader.maxTimestamp={}", .{ ih.maxTs, self.tableHeader.maxTimestamp });
-            return error.InvalidTimestampRange;
-        }
+        std.debug.assert(ih.minTs >= self.tableHeader.minTimestamp);
+        std.debug.assert(ih.maxTs <= self.tableHeader.maxTimestamp);
 
         const indexBlockData = try readIndexBlock(allocator, ih, self.streamReader);
         defer allocator.free(indexBlockData);
@@ -297,14 +258,6 @@ fn readIndexBlock(
     ih: *const IndexBlockHeader,
     streamReader: *StreamReader,
 ) ![]u8 {
-    // Bounds checking
-    if (ih.offset > streamReader.indexBuf.len) {
-        return error.InvalidIndexBlockData;
-    }
-    if (ih.offset + ih.size > streamReader.indexBuf.len) {
-        return error.InvalidIndexBlockData;
-    }
-
     const compressed = streamReader.indexBuf[ih.offset..][0..ih.size];
     const decompressedSize = try @import("encoding").getFrameContentSize(compressed);
     const decompressed = try allocator.alloc(u8, decompressedSize);
