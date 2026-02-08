@@ -72,8 +72,7 @@ fn decodeColumnDescs(
 
     try descs.ensureTotalCapacity(allocator, len);
 
-    var i: usize = 0;
-    while (i < len) : (i += 1) {
+    for (0..len) |_| {
         const columndID: u16 = @intCast(dec.readVarInt());
         const offset = dec.readVarInt();
 

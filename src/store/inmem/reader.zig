@@ -1,4 +1,7 @@
 const std = @import("std");
+
+const encoding = @import("encoding");
+
 const SID = @import("../lines.zig").SID;
 const IndexBlockHeader = @import("IndexBlockHeader.zig");
 const BlockHeader = @import("block_header.zig").BlockHeader;
@@ -128,7 +131,7 @@ pub const BlockReader = struct {
     pub fn initFromTableMem(allocator: std.mem.Allocator, tableMem: *TableMem) !*BlockReader {
         const indexBlockHeaders = try IndexBlockHeader.ReadIndexBlockHeaders(allocator, tableMem.streamWriter.metaIndexBuf.items);
         errdefer {
-            for (indexBlockHeaders) |*h| h.deinitSIDAlloc(allocator);
+            for (indexBlockHeaders) |*h| h.deinit(allocator);
             allocator.free(indexBlockHeaders);
         }
 
@@ -174,7 +177,7 @@ pub const BlockReader = struct {
         self.blockData.deinit(allocator);
 
         for (self.indexBlockHeaders) |*bh| {
-            bh.deinitSIDAlloc(allocator);
+            bh.deinit(allocator);
         }
         allocator.free(self.indexBlockHeaders);
 
@@ -306,11 +309,11 @@ fn readIndexBlock(
     }
 
     const compressed = streamReader.indexBuf[ih.offset..][0..ih.size];
-    const decompressedSize = try @import("encoding").getFrameContentSize(compressed);
+    const decompressedSize = try encoding.getFrameContentSize(compressed);
     const decompressed = try allocator.alloc(u8, decompressedSize);
     errdefer allocator.free(decompressed);
 
-    _ = try @import("encoding").decompress(decompressed, compressed);
+    _ = try encoding.decompress(decompressed, compressed);
     return decompressed;
 }
 

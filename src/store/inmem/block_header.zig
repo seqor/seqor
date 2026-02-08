@@ -61,34 +61,7 @@ pub const BlockHeader = struct {
         return enc.offset;
     }
 
-    pub fn decode(buf: []const u8) BlockHeader {
-        var decoder = Decoder.init(buf);
-
-        const sid = SID.decode(decoder.readBytes(32));
-
-        const size = decoder.readInt(u32);
-        const len = decoder.readInt(u32);
-
-        const timestampsHeader = TimestampsHeader.decode(&decoder);
-
-        const columnsHeaderIndexOffset = decoder.readVarInt();
-        const columnsHeaderIndexSize = decoder.readVarInt();
-        const columnsHeaderOffset = decoder.readVarInt();
-        const columnsHeaderSize = decoder.readVarInt();
-
-        return .{
-            .sid = sid,
-            .size = size,
-            .len = len,
-            .timestampsHeader = timestampsHeader,
-            .columnsHeaderOffset = columnsHeaderOffset,
-            .columnsHeaderSize = columnsHeaderSize,
-            .columnsHeaderIndexOffset = columnsHeaderIndexOffset,
-            .columnsHeaderIndexSize = columnsHeaderIndexSize,
-        };
-    }
-
-    pub fn decodeWithOffset(buf: []const u8) struct { header: BlockHeader, offset: usize } {
+    pub fn decode(buf: []const u8) struct { header: BlockHeader, offset: usize } {
         var decoder = Decoder.init(buf);
 
         const sid = SID.decode(decoder.readBytes(32));
@@ -127,25 +100,22 @@ pub const BlockHeader = struct {
         var buf = src;
 
         while (buf.len > 0) {
-            const res = BlockHeader.decodeWithOffset(buf);
+            const res = BlockHeader.decode(buf);
             try dst.append(allocator, res.header);
             buf = buf[res.offset..];
         }
 
-        try validateBlockHeaders(dst.items[dst_len..]);
+        validateBlockHeaders(dst.items[dst_len..]);
     }
 
-    pub fn validateBlockHeaders(bhs: []const BlockHeader) !void {
+    pub fn validateBlockHeaders(bhs: []const BlockHeader) void {
         if (bhs.len < 2) return;
 
-        var i: usize = 1;
-        while (i < bhs.len) : (i += 1) {
+        for (1..bhs.len) |i| {
             const curr = &bhs[i];
             const prev = &bhs[i - 1];
 
-            if (curr.sid.lessThan(&prev.sid)) {
-                return error.InvalidBlockHeaderOrder;
-            }
+            std.debug.assert(!curr.sid.lessThan(&prev.sid));
 
             if (!curr.sid.eql(&prev.sid)) {
                 continue;
@@ -154,9 +124,7 @@ pub const BlockHeader = struct {
             const th_curr = curr.timestampsHeader;
             const th_prev = prev.timestampsHeader;
 
-            if (th_curr.min < th_prev.min) {
-                return error.InvalidBlockHeaderTimestampOrder;
-            }
+            std.debug.assert(th_curr.min >= th_prev.min);
         }
     }
 };
@@ -198,6 +166,7 @@ pub const ColumnsHeader = struct {
     headers: []ColumnHeader,
     celledColumns: []Column,
     /// When true, deinit owns and frees celledColumns and each column's values (decode path).
+    /// TODO: find a workaround for clear ownership instead of a flag
     owns_celled_columns: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, block: *Block) !*ColumnsHeader {
@@ -622,7 +591,7 @@ test "BlockHeaderEncode" {
         try std.testing.expectEqual(case.expectedLen, offset);
 
         const h = BlockHeader.decode(encodeBuf[0..offset]);
-        try std.testing.expectEqualDeep(case.header, h);
+        try std.testing.expectEqualDeep(case.header, h.header);
     }
 }
 
