@@ -32,10 +32,11 @@ pub fn init(allocator: std.mem.Allocator) !*Self {
 }
 
 pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    self.deinitRead(allocator);
     allocator.destroy(self);
 }
 
-pub fn deinitSIDAlloc(self: *Self, allocator: std.mem.Allocator) void {
+pub fn deinitRead(self: *Self, allocator: std.mem.Allocator) void {
     self.sid.deinit(allocator);
 }
 
@@ -81,7 +82,7 @@ pub fn encode(self: *const Self, buf: []u8) usize {
 pub fn decode(buf: []const u8) Self {
     var decoder = Decoder.init(buf);
     const sid = SID.decode(buf);
-    decoder.offset = 32; // SID is 32 bytes
+    decoder.offset += 32; // SID is 32 bytes
     const minTs = decoder.readInt(u64);
     const maxTs = decoder.readInt(u64);
     const offset = decoder.readInt(u64);
@@ -98,7 +99,7 @@ pub fn decode(buf: []const u8) Self {
 pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) !Self {
     var decoder = Decoder.init(buf);
     const sid = try SID.decodeAlloc(allocator, buf);
-    decoder.offset = 32; // SID is 32 bytes
+    decoder.offset += 32; // SID is 32 bytes
     const minTs = decoder.readInt(u64);
     const maxTs = decoder.readInt(u64);
     const offset = decoder.readInt(u64);
@@ -135,7 +136,7 @@ pub fn readIndexBlockHeaders(
     var dst = try allocator.alloc(Self, count);
     var i: usize = 0;
     errdefer {
-        for (dst[0..i]) |*reader| reader.deinitSIDAlloc(allocator);
+        for (dst[0..i]) |*reader| reader.deinitRead(allocator);
         allocator.free(dst);
     }
 

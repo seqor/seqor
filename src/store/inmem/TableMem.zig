@@ -262,7 +262,8 @@ fn testAddLines(allocator: std.mem.Allocator) !void {
         defer allocator.free(decompressedBuf);
         _ = try encoding.decompress(decompressedBuf, indexContent);
 
-        const blockHeader = BlockHeader.decode(decompressedBuf);
+        const decodedBlockHeader = BlockHeader.decode(decompressedBuf);
+        const blockHeader = decodedBlockHeader.header;
 
         // TODO: compare all the fields in one expect
         try std.testing.expectEqualStrings("1234", blockHeader.sid.tenantID);
