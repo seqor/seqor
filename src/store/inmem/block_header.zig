@@ -143,9 +143,7 @@ pub const BlockHeader = struct {
             const curr = &bhs[i];
             const prev = &bhs[i - 1];
 
-            if (curr.sid.lessThan(&prev.sid)) {
-                return error.InvalidBlockHeaderOrder;
-            }
+            std.debug.assert(!curr.sid.lessThan(&prev.sid));
 
             if (!curr.sid.eql(&prev.sid)) {
                 continue;
@@ -154,9 +152,7 @@ pub const BlockHeader = struct {
             const th_curr = curr.timestampsHeader;
             const th_prev = prev.timestampsHeader;
 
-            if (th_curr.min < th_prev.min) {
-                return error.InvalidBlockHeaderTimestampOrder;
-            }
+            std.debug.assert(th_curr.min >= th_prev.min);
         }
     }
 };
