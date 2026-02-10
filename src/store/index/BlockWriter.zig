@@ -118,10 +118,6 @@ pub fn initFromDiskTable(alloc: Allocator, path: []const u8, fitsInCache: bool) 
 }
 
 pub fn deinit(self: *BlockWriter, alloc: Allocator) void {
-    switch (self.destination) {
-        .mem => {},
-        .disk => |*disk| disk.close(),
-    }
     self.sb.deinit(alloc);
     self.uncompressedIndexBlockBuf.deinit(alloc);
     self.uncompressedMetaindexBuf.deinit(alloc);
@@ -169,7 +165,7 @@ pub fn close(self: *BlockWriter, alloc: Allocator) !void {
     try self.writeMetaindex(alloc);
     switch (self.destination) {
         .mem => {},
-        .disk => |*disk| try disk.sync(),
+        .disk => |*disk| disk.close(),
     }
 }
 
