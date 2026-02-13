@@ -8,10 +8,9 @@ const BlockReader = @import("store/inmem/reader.zig").BlockReader;
 
 const maxLevelSize = 100 * 1024 * 1024 * 1024;
 
-const PartType = enum(u8) {
+const TableType = enum(u8) {
     inmemory = 0,
-    small = 1,
-    big = 2,
+    disk = 1,
 };
 
 inline fn setFlushTime() i64 {
@@ -257,24 +256,24 @@ pub const Data = struct {
         }
     }
 
-    fn getDstPartType(self: *Data, allocator: std.mem.Allocator) PartType {
+    fn getDstTableType(self: *Data, allocator: std.mem.Allocator) TableType {
         _ = self;
         _ = allocator;
 
         // TODO: implement a decision strategy
-        return PartType.inmemory;
+        return TableType.inmemory;
     }
 
-    fn getDstPartPath(self: *Data, allocator: std.mem.Allocator, dstPartType: PartType, mergeIdx: usize) ![]const u8 {
-        var dstPartPath: []const u8 = "";
-        if (dstPartType != .inmemory) {
-            dstPartPath = try std.fmt.allocPrint(
+    fn getDstTablePath(self: *Data, allocator: std.mem.Allocator, dstTableType: TableType, mergeIdx: usize) ![]const u8 {
+        var dstTablePath: []const u8 = "";
+        if (dstTableType != .inmemory) {
+            dstTablePath = try std.fmt.allocPrint(
                 allocator,
                 "{s}/{X:0>16}",
                 .{ self.path, mergeIdx },
             );
         }
-        return dstPartPath;
+        return dstTablePath;
     }
 
     fn nextMergeIdx(self: *Data) usize {
@@ -285,6 +284,7 @@ pub const Data = struct {
         return std.time.Timer.start() catch |err| std.debug.panic("failed to start timer: {s}", .{@errorName(err)});
     }
 
+    // TODO: implement it
     fn openBlockStreamReaders(allocator: std.mem.Allocator) ![]*BlockReader {
         const readers = try allocator.alloc(*BlockReader, 1);
         return readers;
@@ -309,27 +309,24 @@ pub const Data = struct {
         }
 
         var t = timer();
-        const dstPartType = self.getDstPartType(alloc);
-        if (dstPartType != .inmemory) {
+        const dstTableType = self.getDstTableType(alloc);
+        if (dstTableType != .inmemory) {
             // TODO: do some disk reservations when disk type
         }
 
-        switch (dstPartType) {
+        switch (dstTableType) {
             // TODO: track progress
             .inmemory => {},
-            .small => {},
-            .big => {},
+            .disk => {},
         }
         const mergeIdx = self.nextMergeIdx();
         const readers = openBlockStreamReaders(alloc) catch std.debug.panic("failed to open block readers", .{});
         _ = readers;
-        //
-        const dstPathPart = self.getDstPartPath(alloc, dstPartType, mergeIdx) catch std.debug.panic("path problem dstPathPart", .{});
-        defer alloc.free(dstPathPart);
+        const dstPathTable = self.getDstTablePath(alloc, dstTableType, mergeIdx) catch std.debug.panic("path problem dstPathPart", .{});
+        defer alloc.free(dstPathTable);
 
-        // pws[0].mp != nil if we have wrappers
         if (force and tables.len == 1) {
-            tables[0].flushToDisk(alloc, dstPathPart) catch std.debug.panic("failed to flush to disk path={s}", .{dstPathPart});
+            tables[0].flushToDisk(alloc, dstPathTable) catch std.debug.panic("failed to flush to disk path={s}", .{dstPathTable});
         }
 
         _ = t.lap();

@@ -277,8 +277,9 @@ pub const ColumnsHeader = struct {
 
         const headersLen = dec.readVarInt();
         const headers = try allocator.alloc(ColumnHeader, headersLen);
+        var headersDecoded: usize = 0;
         errdefer {
-            for (headers) |*header| header.dict.deinit(allocator);
+            for (headers[0..headersDecoded]) |*header| header.dict.deinit(allocator);
             allocator.free(headers);
         }
 
@@ -286,6 +287,7 @@ pub const ColumnsHeader = struct {
             const colID = cshIdx.columns.items[i].columndID;
             const key = columnIDGen.keyIDs.keys()[colID];
             headers[i] = try ColumnHeader.decode(&dec, key, allocator);
+            headersDecoded += 1;
         }
 
         const celledLen = dec.readVarInt();

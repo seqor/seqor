@@ -96,6 +96,7 @@ pub fn decode(buf: []const u8) Self {
     };
 }
 
+// TODO: unify the way how we use SID
 pub fn decodeAlloc(allocator: std.mem.Allocator, buf: []const u8) !Self {
     var decoder = Decoder.init(buf);
     const sid = try SID.decodeAlloc(allocator, buf);
@@ -119,7 +120,6 @@ pub fn readIndexBlockHeaders(
 ) ![]Self {
     const decompressedSize = try encoding.getFrameContentSize(compressed);
 
-    // potential problem
     var decompressed = try allocator.alloc(u8, decompressedSize);
     defer allocator.free(decompressed);
 
@@ -158,41 +158,6 @@ fn validateIndexBlockHeaders(headers: []const Self) void {
     for (1..headers.len) |i| {
         std.debug.assert(!headers[i].sid.lessThan(&headers[i - 1].sid));
     }
-}
-
-pub fn mustReadNextIndexBlock(
-    self: *const Self,
-    allocator: std.mem.Allocator,
-    dst: *std.ArrayList(u8),
-    indexBuf: []const u8,
-) !void {
-    const indexBlockSize = self.size;
-
-    // Validate indexBlockSize
-    std.debug.assert(indexBlockSize <= maxIndexBlockSize);
-
-    // Validate that offset matches current read position (sequential reading)
-    // if (self.offset != streamReader.indexBytesRead.*) {
-    //     std.log.err("FATAL: indexBlockHeader.offset={} must equal to {}", .{ self.offset, streamReader.indexBytesRead.* });
-    //     return error.InvalidIndexBlockOffset;
-    // }
-
-    // Read compressed data
-    const compressed = indexBuf[self.offset..][0..indexBlockSize];
-
-    // Get decompressed size
-    const decompressedSize = try encoding.getFrameContentSize(compressed);
-
-    // Ensure dst has enough capacity
-    try dst.ensureTotalCapacity(allocator, decompressedSize);
-    dst.items.len = decompressedSize;
-
-    // Decompress
-    const actualDecompressedSize = try encoding.decompress(dst.items, compressed);
-    std.debug.assert(actualDecompressedSize == decompressedSize);
-
-    // Update bytes read position
-    // streamReader.indexBytesRead.* += indexBlockSize;
 }
 
 test "IndexBlockHeaderEncode" {

@@ -24,6 +24,7 @@ pub const StreamReader = struct {
     bloomValuesList: [][]const u8,
     bloomTokensList: [][]const u8,
 
+    // TODO: decode manually when it comes to file reader
     columnIDGen: *const ColumnIDGen,
     colIdx: *const std.AutoHashMap(u16, u16),
     columnsKeysBuf: []const u8,

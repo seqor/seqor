@@ -12,6 +12,7 @@ const ColumnType = @import("block_header.zig").ColumnType;
 const EncodingType = @import("TimestampsEncoder.zig").EncodingType;
 const StreamReader = @import("reader.zig").StreamReader;
 
+// TODO: make it gloabal
 const maxTimestampsBlockSize = 8 * 1024 * 1024;
 const maxValuesBlockSize = 8 * 1024 * 1024;
 const maxColumnsHeaderSize = 8 * 1024 * 1024;
@@ -23,8 +24,9 @@ pub const BlockData = struct {
     rowsCount: u32 = 0,
 
     timestampsData: TimestampsData,
+    columnsHeader: ?*ColumnsHeader = null,
     columnsData: std.ArrayList(ColumnData),
-    celledColumns: ?*const []Column = null,
+    celledColumns: ?[]Column = null,
 
     pub fn initEmpty() BlockData {
         return .{ .columnsData = std.ArrayList(ColumnData).empty, .timestampsData = .{} };
@@ -42,6 +44,9 @@ pub const BlockData = struct {
 
     pub fn deinit(self: *BlockData, allocator: std.mem.Allocator) void {
         self.columnsData.deinit(allocator);
+        if (self.columnsHeader) |ch| {
+            ch.deinit(allocator);
+        }
     }
 
     pub fn readFrom(
@@ -50,6 +55,12 @@ pub const BlockData = struct {
         bh: *const BlockHeader,
         sr: *StreamReader,
     ) !void {
+        // TODO: tidy it up
+        if (self.columnsHeader) |ch| {
+            ch.deinit(allocator);
+            self.columnsHeader = null;
+        }
+
         self.reset();
 
         self.sid = bh.sid;
@@ -61,8 +72,7 @@ pub const BlockData = struct {
         const columnsHeaderSize = bh.columnsHeaderSize;
         std.debug.assert(columnsHeaderSize <= maxColumnsHeaderSize);
 
-        const columnsHeaderBuf =
-            sr.columnsHeaderBuf[bh.columnsHeaderOffset..][0..columnsHeaderSize];
+        const columnsHeaderBuf = sr.columnsHeaderBuf[bh.columnsHeaderOffset..][0..columnsHeaderSize];
 
         // --- index ---
         const columnsHeaderIndexSize = bh.columnsHeaderIndexSize;
@@ -76,22 +86,23 @@ pub const BlockData = struct {
         );
         defer cshIdx.deinit(allocator);
 
-        const csh = try ColumnsHeader.decode(
+        self.columnsHeader = try ColumnsHeader.decode(
             allocator,
             columnsHeaderBuf,
             cshIdx,
             sr.columnIDGen,
         );
-        defer csh.deinit(allocator);
 
-        try self.columnsData.ensureTotalCapacity(allocator, csh.headers.len);
+        const columnsHeader = self.columnsHeader.?;
 
-        for (csh.headers) |*ch| {
+        try self.columnsData.ensureTotalCapacity(allocator, columnsHeader.headers.len);
+
+        for (columnsHeader.headers) |*ch| {
             const col = try ColumnData.readFrom(ch, sr);
             self.columnsData.appendAssumeCapacity(col);
         }
 
-        self.celledColumns = &csh.celledColumns;
+        self.celledColumns = columnsHeader.celledColumns;
     }
 };
 
@@ -122,7 +133,7 @@ pub const TimestampsData = struct {
 
 pub const ColumnData = struct {
     name: []const u8,
-    valueType: *const ColumnType,
+    valueType: ColumnType,
 
     minValue: u64,
     maxValue: u64,
@@ -154,7 +165,7 @@ pub const ColumnData = struct {
 
         return .{
             .name = ch.key,
-            .valueType = &ch.type,
+            .valueType = ch.type,
 
             .minValue = ch.min,
             .maxValue = ch.max,
@@ -166,3 +177,102 @@ pub const ColumnData = struct {
         };
     }
 };
+
+const Line = @import("../lines.zig").Line;
+const Field = @import("../lines.zig").Field;
+const TableMem = @import("TableMem.zig");
+const BlockReader = @import("reader.zig").BlockReader;
+
+test "BlockData initEmpty and deinit without header" {
+    var bd = BlockData.initEmpty();
+    try std.testing.expectEqual(@as(?*ColumnsHeader, null), bd.columnsHeader);
+    try std.testing.expectEqual(@as(?[]Column, null), bd.celledColumns);
+
+    // Should not crash when deinit is called with no decoded data.
+    bd.deinit(std.testing.allocator);
+}
+
+const SampleLines = struct {
+    fields1: [2]Field,
+    fields2: [2]Field,
+    fields3: [2]Field,
+    lines: [3]Line,
+};
+
+fn populateSampleLines(sample: *SampleLines) void {
+    sample.fields1 = .{
+        .{ .key = "level", .value = "info" },
+        .{ .key = "app", .value = "seq" },
+    };
+    sample.fields2 = .{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    sample.fields3 = .{
+        .{ .key = "level", .value = "warn" },
+        .{ .key = "app", .value = "seq" },
+    };
+    sample.lines = .{
+        .{
+            .timestampNs = 1,
+            .sid = .{ .id = 2, .tenantID = "2222" },
+            .fields = sample.fields1[0..],
+        },
+        .{
+            .timestampNs = 2,
+            .sid = .{ .id = 1, .tenantID = "1111" },
+            .fields = sample.fields2[0..],
+        },
+        .{
+            .timestampNs = 3,
+            .sid = .{ .id = 1, .tenantID = "1111" },
+            .fields = sample.fields3[0..],
+        },
+    };
+}
+
+test "BlockData readFrom populates columnsData and celledColumns" {
+    const allocator = std.testing.allocator;
+
+    var sample: SampleLines = .{
+        .fields1 = undefined,
+        .fields2 = undefined,
+        .fields3 = undefined,
+        .lines = undefined,
+    };
+    populateSampleLines(&sample);
+
+    var lines = [3]*const Line{
+        &sample.lines[0],
+        &sample.lines[1],
+        &sample.lines[2],
+    };
+
+    const memTable = try TableMem.init(allocator);
+    defer memTable.deinit(allocator);
+    try memTable.addLines(allocator, lines[0..]);
+
+    const blockReader = try BlockReader.initFromTableMem(allocator, memTable);
+    defer blockReader.deinit(allocator);
+
+    // Read first block, which should populate BlockData.
+    try std.testing.expect(try blockReader.nextBlock(allocator));
+
+    const bd = &blockReader.blockData;
+    try std.testing.expect(bd.columnsHeader != null);
+    const ch = bd.columnsHeader.?;
+
+    // BlockData must mirror the number of column headers.
+    try std.testing.expectEqual(ch.headers.len, bd.columnsData.items.len);
+
+    // When there are any column headers, each ColumnData should correspond to its ColumnHeader.
+    for (ch.headers, bd.columnsData.items) |*header, col| {
+        try std.testing.expectEqualStrings(header.key, col.name);
+        try std.testing.expectEqual(header.type, col.valueType);
+        try std.testing.expectEqual(header.size, col.valuesData.len);
+        try std.testing.expectEqual(&header.dict, col.valuesDict);
+    }
+
+    // Second call to nextBlock exercises BlockData reuse path (columnsHeader deinit + re-decode).
+    _ = try blockReader.nextBlock(allocator);
+}

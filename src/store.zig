@@ -181,6 +181,7 @@ pub const Store = struct {
         const indexTable = try IndexRecorder.init(allocator, "");
         const index = try Index.init(allocator, indexTable);
 
+        // TODO: replace abc to path from config file
         const data = try Data.init(allocator, self.backgroundAllocator, "abc"[0..]);
         // TODO: remove unused parts directories
 
