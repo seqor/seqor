@@ -265,15 +265,21 @@ pub const Data = struct {
     }
 
     fn getDstTablePath(self: *Data, allocator: std.mem.Allocator, dstTableType: TableType, mergeIdx: usize) ![]const u8 {
-        var dstTablePath: []const u8 = "";
-        if (dstTableType != .inmemory) {
-            dstTablePath = try std.fmt.allocPrint(
-                allocator,
-                "{s}/{X:0>16}",
-                .{ self.path, mergeIdx },
-            );
+        // In-memory tables do not have a destination path.
+        if (dstTableType == .inmemory) {
+            return "";
         }
-        return dstTablePath;
+
+        // For file-backed tables, allocate exact buffer and format the path into it.
+        const buf_len = self.path.len + 1 + 16; // "{path}/{mergeIdx_as_16_hex}"
+        const destinationTablePath = try allocator.alloc(u8, buf_len);
+        _ = try std.fmt.bufPrint(
+            destinationTablePath,
+            "{s}/{X:0>16}",
+            .{ self.path, mergeIdx },
+        );
+
+        return destinationTablePath;
     }
 
     fn nextMergeIdx(self: *Data) usize {
@@ -323,9 +329,9 @@ pub const Data = struct {
         const readers = openBlockStreamReaders(alloc) catch std.debug.panic("failed to open block readers", .{});
         _ = readers;
         const dstPathTable = self.getDstTablePath(alloc, dstTableType, mergeIdx) catch std.debug.panic("path problem dstPathPart", .{});
-        defer alloc.free(dstPathTable);
+        defer if (dstTableType != .inmemory and dstPathTable.len > 0) alloc.free(dstPathTable);
 
-        if (force and tables.len == 1) {
+        if (force and tables.len == 1 and dstTableType != .inmemory) {
             tables[0].flushToDisk(alloc, dstPathTable) catch std.debug.panic("failed to flush to disk path={s}", .{dstPathTable});
         }
 

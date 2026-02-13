@@ -21,25 +21,14 @@ pub const StreamReader = struct {
 
     messageBloomValuesBuf: []const u8,
     messageBloomTokensBuf: []const u8,
-    bloomValuesList: [][]const u8,
-    bloomTokensList: [][]const u8,
+    bloomValuesList: *const std.ArrayList(std.ArrayList(u8)),
+    bloomTokensList: *const std.ArrayList(std.ArrayList(u8)),
 
     // TODO: decode manually when it comes to file reader
     columnIDGen: *const ColumnIDGen,
     colIdx: *const std.AutoHashMap(u16, u16),
     columnsKeysBuf: []const u8,
     columnIdxsBuf: []const u8,
-
-    fn asReadonly2D(
-        allocator: std.mem.Allocator,
-        list: *const std.ArrayList(std.ArrayList(u8)),
-    ) ![][]const u8 {
-        var out = try allocator.alloc([]const u8, list.items.len);
-        for (list.items, 0..) |inner, i| {
-            out[i] = inner.items;
-        }
-        return out;
-    }
 
     pub fn init(allocator: std.mem.Allocator, tableMem: *TableMem) !*StreamReader {
         const r = try allocator.create(StreamReader);
@@ -52,8 +41,8 @@ pub const StreamReader = struct {
 
             .messageBloomValuesBuf = tableMem.streamWriter.messageBloomValuesBuf.items,
             .messageBloomTokensBuf = tableMem.streamWriter.messageBloomTokensBuf.items,
-            .bloomValuesList = try asReadonly2D(allocator, &tableMem.streamWriter.bloomValuesList),
-            .bloomTokensList = try asReadonly2D(allocator, &tableMem.streamWriter.bloomTokensList),
+            .bloomValuesList = &tableMem.streamWriter.bloomValuesList,
+            .bloomTokensList = &tableMem.streamWriter.bloomTokensList,
 
             .columnIDGen = tableMem.streamWriter.columnIDGen,
             .colIdx = &tableMem.streamWriter.colIdx,
@@ -64,9 +53,6 @@ pub const StreamReader = struct {
     }
 
     pub fn deinit(self: *StreamReader, allocator: std.mem.Allocator) void {
-        allocator.free(self.bloomTokensList);
-        allocator.free(self.bloomValuesList);
-
         allocator.destroy(self);
     }
 
@@ -80,11 +66,11 @@ pub const StreamReader = struct {
         total += self.columnsHeaderIndexBuf.len;
         total += self.messageBloomValuesBuf.len;
         total += self.messageBloomTokensBuf.len;
-        for (self.bloomValuesList) |buf| {
-            total += buf.len;
+        for (self.bloomValuesList.items) |buf| {
+            total += buf.items.len;
         }
-        for (self.bloomTokensList) |buf| {
-            total += buf.len;
+        for (self.bloomTokensList.items) |buf| {
+            total += buf.items.len;
         }
         total += self.columnsKeysBuf.len;
         total += self.columnIdxsBuf.len;
