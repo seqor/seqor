@@ -12,7 +12,7 @@ const ColumnType = @import("block_header.zig").ColumnType;
 const EncodingType = @import("TimestampsEncoder.zig").EncodingType;
 const StreamReader = @import("reader.zig").StreamReader;
 
-// TODO: make it gloabal
+// TODO: make it gloabal, potentially it can be used as a global constant by others
 const maxTimestampsBlockSize = 8 * 1024 * 1024;
 const maxValuesBlockSize = 8 * 1024 * 1024;
 const maxColumnsHeaderSize = 8 * 1024 * 1024;
