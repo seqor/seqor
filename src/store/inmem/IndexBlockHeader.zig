@@ -120,14 +120,14 @@ pub fn readIndexBlockHeaders(
 ) ![]Self {
     const decompressedSize = try encoding.getFrameContentSize(compressed);
 
-    var decompressed = try allocator.alloc(u8, decompressedSize);
-    defer allocator.free(decompressed);
+    var decompressedBuf = try allocator.alloc(u8, decompressedSize);
+    defer allocator.free(decompressedBuf);
 
-    // TODO use actual decompressed size, not decompressed.len, it's bit incorrect
-    _ = try encoding.decompress(
-        decompressed,
+    const n = try encoding.decompress(
+        decompressedBuf,
         compressed,
     );
+    const decompressed = decompressedBuf[0..n];
 
     std.debug.assert(decompressed.len % encodeExpectedSize == 0);
 
