@@ -1,0 +1,30 @@
+src/pprof/backend.zig
+  s_3ea650c14e16f8::t_a5ca838e7d3cbf 298
+  s_3ea650c14e16f8::t_228fe229df54e3 74-76
+  s_3ea650c14e16f8::t_d1d83ab5460a12 101-103
+  s_3ea650c14e16f8::t_02a05502da9f38 251-295,299-303
+  s_3ea650c14e16f8::t_4e17b5f680d379 2
+  s_3ea650c14e16f8::t_7db5dade4eca9b 296-297
+  s_3ea650c14e16f8::t_6f97683cc2a34e 304-306
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ebfd35f50de3829705aeb76a2cc6d863d0ef0db0",
+  "prompts": {},
+  "humans": {
+    "h_2dd3d53392047d": {
+      "author": "Denis Dvornikov <candyboobers@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_3ea650c14e16f8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "51bd60b9-60a9-42be-a370-8b7704ac9e95",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Denis Dvornikov <candyboobers@gmail.com>"
+    }
+  }
+}
