@@ -26,6 +26,7 @@ services:
       args:
         OPTIMIZE: ReleaseSafe
         TRACY: false
+        PPROF: true
     command: ["/usr/local/bin/ochi"]
     cgroup_parent: ochi.slice
     profiles: ["profile"]

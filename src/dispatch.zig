@@ -5,6 +5,7 @@ const Io = std.Io;
 const httpz = @import("httpz");
 const DispatchMeter = @import("observe/DispatchMeter.zig");
 const StoreMeter = @import("observe/StoreMeter.zig");
+const PprofAllocator = @import("pprof/PprofAllocator.zig");
 const Logger = @import("logging");
 const AppConfig = @import("Conf.zig").AppConfig;
 const Runtime = @import("Runtime.zig");
@@ -26,6 +27,7 @@ pub const AppContext = struct {
     // observing
     dispatchMeter: *DispatchMeter,
     storeMeter: *StoreMeter,
+    pprofAlloc: *PprofAllocator,
 
     // app dependencies
     accumulatorPool: *AccumulatorPool,
@@ -48,6 +50,7 @@ pub const Dispatcher = struct {
     conf: *const AppConfig,
     store: *Store,
     meter: DispatchMeter,
+    pprofAlloc: *PprofAllocator,
     accumulatorPool: *AccumulatorPool,
     querySem: std.Io.Semaphore,
 
@@ -57,6 +60,7 @@ pub const Dispatcher = struct {
         conf: *const AppConfig,
         runtime: *const Runtime,
         store: *Store,
+        pprofAlloc: *PprofAllocator,
     ) !Dispatcher {
         var meter = try DispatchMeter.init(allocator, io);
         errdefer meter.deinit();
@@ -70,6 +74,7 @@ pub const Dispatcher = struct {
             .conf = conf,
             .store = store,
             .meter = meter,
+            .pprofAlloc = pprofAlloc,
             .accumulatorPool = accumulatorPool,
             .querySem = .{ .permits = conf.maxQueryConnectionsLimit(runtime) },
         };
@@ -110,6 +115,7 @@ pub const Dispatcher = struct {
             .store = self.store,
             .dispatchMeter = &self.meter,
             .storeMeter = &self.store.meter,
+            .pprofAlloc = self.pprofAlloc,
             .accumulatorPool = self.accumulatorPool,
             .request = &.{
                 .tenantID = tenantID,

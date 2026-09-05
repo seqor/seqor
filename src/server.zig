@@ -13,8 +13,10 @@ const Store = @import("Store.zig").Store;
 const Layout = @import("Layout.zig");
 const ingest = @import("handlers/ingest.zig");
 const query = @import("handlers/query.zig");
+const pprof = @import("handlers/pprof.zig");
 const flush = @import("handlers/flush.zig");
 const stream_ids = @import("handlers/stream_ids.zig");
+const PprofAllocator = @import("pprof/PprofAllocator.zig");
 const Logger = @import("logging");
 
 var global_server: ?*httpz.Server(*Dispatcher) = null;
@@ -60,9 +62,20 @@ pub const StartOptions = struct {
     // TODO: we must get rid of a global logger, it's not ok,
     // but before we must reimplement the logger to manage buffers per thread / worker
     setupLogger: bool = true,
+    pprof: bool = false,
 };
 
-pub fn startApp(io: Io, alloc: std.mem.Allocator, options: StartOptions) !void {
+pub fn startApp(io: Io, baseAllocator: std.mem.Allocator, options: StartOptions) !void {
+    var pprofAlloc: PprofAllocator = .{
+        .child = baseAllocator,
+        .io = io,
+    };
+    defer pprofAlloc.deinit();
+    var alloc = baseAllocator;
+    if (options.pprof) {
+        alloc = pprofAlloc.allocator();
+    }
+
     const conf = Conf.default();
     var cwdBuf: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -105,11 +118,18 @@ pub fn startApp(io: Io, alloc: std.mem.Allocator, options: StartOptions) !void {
     defer store.deinit(io, alloc);
     try store.start(io, alloc);
 
-    try startServer(io, alloc, conf, runtime, &store);
+    try startServer(io, alloc, conf, runtime, &store, &pprofAlloc);
 }
 
-pub fn startServer(io: Io, allocator: std.mem.Allocator, conf: Conf, runtime: *Runtime, store: *Store) !void {
-    var dispatcher = try Dispatcher.init(io, allocator, &conf.app, runtime, store);
+pub fn startServer(
+    io: Io,
+    allocator: std.mem.Allocator,
+    conf: Conf,
+    runtime: *Runtime,
+    store: *Store,
+    pprofAlloc: *PprofAllocator,
+) !void {
+    var dispatcher = try Dispatcher.init(io, allocator, &conf.app, runtime, store, pprofAlloc);
     defer {
         dispatcher.accumulatorPool.flushAll(io) catch |err| {
             Logger.log(.err, "failed to flush accumulator pool", .{ .err = err });
@@ -135,6 +155,7 @@ pub fn startServer(io: Io, allocator: std.mem.Allocator, conf: Conf, runtime: *R
     var router = try server.router(.{});
     router.get("/health", health, .{});
     router.get("/metrics", metrics, .{});
+    router.get("/debug/pprof/allocs", pprof.allocsHandler, .{});
 
     router.get("/ingest/loki/ready", ingest.ingestLokiReady, .{});
     router.post("/ingest/loki/api/v1/push", ingest.ingestLokiJsonHandler, .{});

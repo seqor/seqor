@@ -237,6 +237,7 @@ test "large body is processed and appears in the query response" {
         .store = &store,
         .dispatchMeter = undefined,
         .storeMeter = undefined,
+        .pprofAlloc = undefined,
         .accumulatorPool = accumulatorPool,
         .request = &.{
             .tenantID = 0,

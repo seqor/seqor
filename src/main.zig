@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const DebugIo = @import("stds/Io/DebugIo.zig");
 
@@ -67,6 +66,7 @@ pub fn main() !void {
     try server.startApp(io, alloc, .{
         .release = build.release,
         .version = build.version,
+        .pprof = build.pprof,
     });
 }
 

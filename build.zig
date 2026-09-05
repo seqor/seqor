@@ -1,9 +1,11 @@
 const std = @import("std");
 
-fn addOption(
+/// adds option to runtime buildin
+fn addOptionBuiltin(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
     release: bool,
+    pprof: bool,
 ) void {
     // add build options to runtime
     const options = b.addOptions();
@@ -14,6 +16,7 @@ fn addOption(
     const version = b.run(args);
     options.addOption([]const u8, "version", version);
     options.addOption(bool, "release", release);
+    options.addOption(bool, "pprof", pprof);
 }
 
 pub fn build(b: *std.Build) void {
@@ -24,10 +27,16 @@ pub fn build(b: *std.Build) void {
     // explicit release flag since we use ReleaseSafe for profiling
     const release = b.option(bool, "release", "Release") orelse false;
     // Allow the user to enable or disable Tracy support with a build flag
-    const tracy_enabled = b.option(
+    const tracyEnabled = b.option(
         bool,
         "tracy",
         "Build with Tracy support.",
+    ) orelse false;
+    // pprof profile
+    const pprofEnabled = b.option(
+        bool,
+        "pprof",
+        "Enable pprof profile",
     ) orelse false;
     // test filter to run a specific set of tests
     const test_filter = b.option([]const []const u8, "test-filter", "Test filter");
@@ -100,7 +109,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // all the projects imports, main bin and tests
-    const tracyImpl = if (tracy_enabled) "tracy_impl_enabled" else "tracy_impl_disabled";
+    const tracyImpl = if (tracyEnabled) "tracy_impl_enabled" else "tracy_impl_disabled";
     const imports = [_]std.Build.Module.Import{
         std.Build.Module.Import{ .name = "zeit", .module = zeit.module("zeit") },
         std.Build.Module.Import{ .name = "httpz", .module = httpz.module("httpz") },
@@ -129,7 +138,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    addOption(b, exe, release);
+    addOptionBuiltin(b, exe, release, pprofEnabled);
     b.installArtifact(exe);
 
     const scooby_exe = b.addExecutable(.{
@@ -142,7 +151,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    addOption(b, scooby_exe, release);
+    addOptionBuiltin(b, scooby_exe, release, pprofEnabled);
     b.installArtifact(scooby_exe);
 
     // run command
@@ -169,7 +178,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |filter| filter else &[_][]const u8{},
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .server },
     });
-    addOption(b, unit_tests, release);
+    addOptionBuiltin(b, unit_tests, release, pprofEnabled);
 
     // encoding module tests
     const encoding_tests = b.addTest(.{
