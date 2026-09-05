@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Writer = std.Io.Writer;
@@ -70,6 +71,9 @@ pub fn writeHeapProfile(io: Io, alloc: Allocator, pprofAlloc: *PprofAllocator, w
     var syms: std.ArrayList(std.debug.Symbol) = .empty;
     defer syms.deinit(alloc);
 
+    var symtab = SymbolTable.load(alloc, io);
+    defer if (symtab) |*s| s.deinit(alloc);
+
     for (buckets) |bucket| {
         for (bucket.getAddrs()) |addr| {
             if (locationIds.contains(addr)) continue;
@@ -87,12 +91,16 @@ pub fn writeHeapProfile(io: Io, alloc: Allocator, pprofAlloc: *PprofAllocator, w
                     };
 
                     if (syms.items.len > 0) break :blk syms.items[0];
+                } else {
+                    std.log.warn("debug self info is null", .{});
                 }
 
                 break :blk .unknown;
             };
 
-            const nameId = try strings.intern(alloc, sym.name orelse nameUnknown);
+            // prefer the qualified name when resolvable
+            const qualifiedName = if (symtab) |*s| s.lookup(alloc, io, addr, selfInfo) else sym.name;
+            const nameId = try strings.intern(alloc, qualifiedName orelse nameUnknown);
             const fileId = try strings.intern(alloc, if (sym.source_location) |sl| sl.file_name else "");
 
             const line: u32 = if (sym.source_location) |sl| @intCast(sl.line) else 0;
@@ -240,3 +248,95 @@ fn writeValueTypeMsg(arena: Allocator, typeId: u32, unitId: u32) ![]u8 {
     try putVarintField(&aw.writer, 2, unitId);
     return aw.written();
 }
+
+// Loads this process' executable and reads its linker symbol table directly,
+// it has to bypass DWARF since DWARF DW_AT_name for a function is just the short name,
+// e.g. "run" instead of "TimerLoop.run"
+const SymbolTable = struct {
+    const Impl = switch (builtin.target.os.tag) {
+        .macos => std.debug.MachOFile,
+        .linux => std.debug.ElfFile,
+        // TODO: come up with windows solution
+        else => void,
+    };
+
+    impl: Impl,
+    // path comes from process api, so it's null terminalted
+    exePath: [:0]u8,
+
+    fn load(alloc: Allocator, io: Io) ?SymbolTable {
+        if (Impl == void) return null;
+
+        const path = std.process.executablePathAlloc(io, alloc) catch |err| {
+            std.log.err("failed to read executable path, err={any}", .{err});
+            return null;
+        };
+        errdefer alloc.free(path);
+
+        const impl: Impl = switch (builtin.target.os.tag) {
+            .macos => std.debug.MachOFile.load(alloc, io, path, builtin.cpu.arch) catch |err| {
+                std.log.err("failed to load debug symbols table, err={any}", .{err});
+                return null;
+            },
+            .linux => blk: {
+                var file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+                    std.log.err("failed to open executable file, err={any}", .{err});
+                    return null;
+                };
+                defer file.close(io);
+                break :blk std.debug.ElfFile.load(alloc, io, file, null, &.native(path)) catch |err| {
+                    std.log.err("failed to load debug symbols table, err={any}", .{err});
+                    return null;
+                };
+            },
+            .windows => {
+                std.log.err("windows is not supported, pls submit a PR to make it happen", .{});
+                return null;
+            },
+            else => {
+                std.log.err("OS is not supported, raise an issue to make it happen", .{});
+                return null;
+            },
+        };
+
+        return .{ .impl = impl, .exePath = path };
+    }
+
+    fn deinit(self: *SymbolTable, alloc: Allocator) void {
+        self.impl.deinit(alloc);
+        alloc.free(self.exePath);
+    }
+
+    fn lookup(self: *SymbolTable, alloc: Allocator, io: Io, addr: usize, maybeSi: ?*std.debug.SelfInfo) ?[]const u8 {
+        const si = if (maybeSi) |s| s else {
+            std.log.err("can't lookup symbol table, debug self info is null", .{});
+            return null;
+        };
+        const slide = si.getModuleSlide(io, addr) catch |err| {
+            std.log.err("failed to get module slide, err={any}", .{err});
+            return null;
+        };
+        const vaddr = addr - slide;
+
+        switch (builtin.target.os.tag) {
+            // macho symbols are prefixed with "_", strip it
+            .macos => {
+                const name = self.impl.lookupSymbolName(vaddr) catch |err| {
+                    std.log.err("failed to lookup symbol name, err={any}", .{err});
+                    return null;
+                };
+                return std.mem.trimStart(u8, name, "_");
+            },
+            .linux => {
+                const name = self.impl.searchSymtab(alloc, vaddr) catch |err| {
+                    std.log.err("failed to lookup symbol name, err={any}", .{err});
+                    return null;
+                };
+                return name;
+            },
+            else => {
+                std.log.err("not implemented for your OS", .{});
+            },
+        }
+    }
+};
