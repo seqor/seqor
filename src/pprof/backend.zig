@@ -289,10 +289,6 @@ const SymbolTable = struct {
                     return null;
                 };
             },
-            .windows => {
-                std.log.err("windows is not supported, pls submit a PR to make it happen", .{});
-                return null;
-            },
             else => {
                 std.log.err("OS is not supported, raise an issue to make it happen", .{});
                 return null;
@@ -328,11 +324,11 @@ const SymbolTable = struct {
                 return std.mem.trimStart(u8, name, "_");
             },
             .linux => {
-                const name = self.impl.searchSymtab(alloc, vaddr) catch |err| {
+                const sym = self.impl.searchSymtab(alloc, vaddr) catch |err| {
                     std.log.err("failed to lookup symbol name, err={any}", .{err});
                     return null;
                 };
-                return name;
+                return sym.name;
             },
             else => {
                 std.log.err("not implemented for your OS", .{});
