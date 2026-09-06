@@ -144,6 +144,7 @@ pub fn startServer(
         },
         .workers = .{
             .max_conn = @intCast(conf.app.maxConnections),
+            .retain_allocated_bytes = 4 * 1024 * 1024,
         },
     }, &dispatcher);
     registerSigtermHandler();
